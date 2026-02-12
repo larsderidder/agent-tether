@@ -123,7 +123,7 @@ Contributions welcome! Please feel free to submit a Pull Request.
 
 ## Related Projects
 
-This library is extracted from [Tether](https://github.com/xithing/tether), a full-featured control plane for supervising AI coding agents.
+This library is extracted from [Tether](https://github.com/larsderidder/tether), a full-featured control plane for supervising AI coding agents.
 
 ## License
 

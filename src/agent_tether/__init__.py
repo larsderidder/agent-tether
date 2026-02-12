@@ -1,36 +1,43 @@
-"""agent-tether: Tether your AI agents to human oversight through chat platforms."""
+"""agent-tether: Chat platform bridges for AI agent supervision."""
 
-from agent_tether.formatting import format_tool_input, humanize_key, humanize_enum_value
-from agent_tether.models import ApprovalRequest, CommandDef, Handlers
-from agent_tether.router import BridgeRouter
-from agent_tether.subscriber import EventSubscriber
+from agent_tether.base import (
+    ApprovalRequest,
+    ApprovalResponse,
+    BridgeConfig,
+    BridgeInterface,
+    GetSessionDirectory,
+    GetSessionInfo,
+    HumanInput,
+    OnSessionBound,
+)
+from agent_tether.manager import BridgeManager
+from agent_tether.subscriber import BridgeSubscriber
 
 __all__ = [
-    # Core bridge components
+    # Core types
     "ApprovalRequest",
-    "CommandDef",
-    "EventSubscriber",
-    "Handlers",
-    "BridgeRouter",
+    "ApprovalResponse",
+    "BridgeConfig",
+    "BridgeInterface",
+    "GetSessionDirectory",
+    "GetSessionInfo",
+    "HumanInput",
+    "OnSessionBound",
+    # Manager and subscriber
+    "BridgeManager",
+    "BridgeSubscriber",
     # Platform bridges (lazy loaded)
     "TelegramBridge",
     "SlackBridge",
     "DiscordBridge",
-    # Formatting utilities
-    "format_tool_input",
-    "humanize_key",
-    "humanize_enum_value",
-    # Runner module (lazy loaded)
-    "runner",
 ]
 
 
 def __getattr__(name: str):
-    """Lazy imports for platform bridges and session module — avoids requiring optional deps at import time."""
+    """Lazy imports for platform bridges."""
     if name == "TelegramBridge":
         try:
-            from agent_tether.platforms.telegram.bridge import TelegramBridge
-
+            from agent_tether.telegram.bot import TelegramBridge
             return TelegramBridge
         except ImportError:
             raise ImportError(
@@ -39,8 +46,7 @@ def __getattr__(name: str):
             ) from None
     if name == "SlackBridge":
         try:
-            from agent_tether.platforms.slack.bridge import SlackBridge
-
+            from agent_tether.slack.bot import SlackBridge
             return SlackBridge
         except ImportError:
             raise ImportError(
@@ -49,16 +55,11 @@ def __getattr__(name: str):
             ) from None
     if name == "DiscordBridge":
         try:
-            from agent_tether.platforms.discord.bridge import DiscordBridge
-
+            from agent_tether.discord.bot import DiscordBridge
             return DiscordBridge
         except ImportError:
             raise ImportError(
                 "DiscordBridge requires discord.py. "
                 "Install with: pip install agent-tether[discord]"
             ) from None
-    if name == "runner":
-        from agent_tether import runner as runner_module
-
-        return runner_module
     raise AttributeError(f"module 'agent_tether' has no attribute {name!r}")

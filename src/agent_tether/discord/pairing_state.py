@@ -1,6 +1,8 @@
 """Discord pairing state (paired user IDs + pairing code).
 
-Lightweight, file-backed allowlist for the Discord bridge.
+This is a lightweight, file-backed allowlist used by the Discord bridge.
+We keep it out of the DB intentionally: it's bridge-specific and can be
+reset by deleting the JSON file in the data dir.
 """
 
 from __future__ import annotations
@@ -17,14 +19,13 @@ def _now_iso() -> str:
 
 
 def generate_pairing_code() -> str:
-    """Generate an 8-digit pairing code."""
+    # 8 digits: easy to type, ~1e8 search space (online guessing is constrained
+    # by Discord and by the fact the attacker must be in the control channel).
     return f"{secrets.randbelow(10**8):08d}"
 
 
 @dataclass
-class PairingState:
-    """Persistent pairing state for Discord authorization."""
-
+class DiscordPairingState:
     pairing_code: str
     paired_user_ids: set[int]
     control_channel_id: int | None
@@ -43,11 +44,10 @@ def load_or_create(
     *,
     path: Path,
     fixed_code: str | None = None,
-) -> PairingState:
-    """Load pairing state from disk, or create a new one."""
+) -> DiscordPairingState:
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    state: PairingState | None = None
+    state: DiscordPairingState | None = None
     if path.exists():
         try:
             raw = json.loads(path.read_text("utf-8"))
@@ -58,7 +58,7 @@ def load_or_create(
             control_channel_id = int(cc) if cc is not None and str(cc).strip() else None
             created_at = str(raw.get("created_at") or "").strip() or _now_iso()
             if code:
-                state = PairingState(
+                state = DiscordPairingState(
                     pairing_code=code,
                     paired_user_ids=ids,
                     control_channel_id=control_channel_id,
@@ -68,7 +68,7 @@ def load_or_create(
             state = None
 
     if state is None:
-        state = PairingState(
+        state = DiscordPairingState(
             pairing_code=(fixed_code or "").strip() or generate_pairing_code(),
             paired_user_ids=set(),
             control_channel_id=None,
@@ -84,7 +84,6 @@ def load_or_create(
     return state
 
 
-def save(*, path: Path, state: PairingState) -> None:
-    """Save pairing state to disk."""
+def save(*, path: Path, state: DiscordPairingState) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state.to_json(), indent=2, sort_keys=True) + "\n", "utf-8")
