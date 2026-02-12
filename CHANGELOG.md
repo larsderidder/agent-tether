@@ -14,7 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `RunnerRegistry` for factory-based runner creation
   - `RunnerUnavailableError` exception
 - Comprehensive test suite (41 tests)
-- Full documentation in README.md and DESIGN.md
+- Full documentation in README.md
 
 ### Changed
 - Simplified package scope to bridges + runner protocol only

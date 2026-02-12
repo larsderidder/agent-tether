@@ -115,7 +115,6 @@ await runner.stop("sess_1")
 
 ## Documentation
 
-- **[DESIGN.md](DESIGN.md)** — Full architecture, API reference, and configuration options
 - **[CHANGELOG.md](CHANGELOG.md)** — Version history and changes
 
 ## Contributing

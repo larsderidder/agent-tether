@@ -63,13 +63,6 @@ Issues = "https://github.com/xithing/agent-tether/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agent_tether"]
 
-[tool.hatch.build.targets.sdist]
-exclude = [
-    "PACKAGE_PLAN.md",
-    "PACKAGE_PLAN_REVISED.md",
-    "STATUS.md",
-]
-
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
