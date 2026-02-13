@@ -134,4 +134,3 @@ class BridgeManager:
             raise ValueError(f"No bridge registered for platform: {platform}")
 
         return await bridge.create_thread(session_id, session_name)
-

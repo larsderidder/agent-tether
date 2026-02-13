@@ -174,9 +174,7 @@ async def test_handle_approval_text_response_allow(tmp_path):
     callbacks.respond_to_permission = respond
 
     bridge = FakeTextBridge(tmp_path, callbacks=callbacks)
-    request = ApprovalRequest(
-        request_id="req_1", title="Bash", description="ls", options=[]
-    )
+    request = ApprovalRequest(request_id="req_1", title="Bash", description="ls", options=[])
     bridge.set_pending_permission("s1", request)
 
     ok, message = await bridge._handle_approval_text_response(
@@ -194,9 +192,7 @@ async def test_handle_approval_text_response_deny_with_reason(tmp_path):
     callbacks.respond_to_permission = respond
 
     bridge = FakeTextBridge(tmp_path, callbacks=callbacks)
-    request = ApprovalRequest(
-        request_id="req_1", title="Bash", description="rm -rf", options=[]
-    )
+    request = ApprovalRequest(request_id="req_1", title="Bash", description="rm -rf", options=[])
     bridge.set_pending_permission("s1", request)
 
     ok, message = await bridge._handle_approval_text_response(
@@ -214,9 +210,7 @@ async def test_handle_approval_text_response_allow_all_timer(tmp_path):
     callbacks.respond_to_permission = respond
 
     bridge = FakeTextBridge(tmp_path, callbacks=callbacks)
-    request = ApprovalRequest(
-        request_id="req_1", title="Bash", description="ls", options=[]
-    )
+    request = ApprovalRequest(request_id="req_1", title="Bash", description="ls", options=[])
 
     ok, message = await bridge._handle_approval_text_response(
         "s1", request, {"allow": True, "reason": None, "timer": "all"}

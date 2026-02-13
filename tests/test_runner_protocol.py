@@ -28,7 +28,9 @@ class FakeEvents:
         self.calls: list[tuple[str, tuple, dict]] = []
 
     async def on_output(self, session_id, stream, text, *, kind="final", is_final=None):
-        self.calls.append(("on_output", (session_id, stream, text), {"kind": kind, "is_final": is_final}))
+        self.calls.append(
+            ("on_output", (session_id, stream, text), {"kind": kind, "is_final": is_final})
+        )
 
     async def on_error(self, session_id, code, message):
         self.calls.append(("on_error", (session_id, code, message), {}))
@@ -45,14 +47,30 @@ class FakeEvents:
     async def on_heartbeat(self, session_id, elapsed_s, done):
         self.calls.append(("on_heartbeat", (session_id, elapsed_s, done), {}))
 
-    async def on_header(self, session_id, *, title, model=None, provider=None, sandbox=None, approval=None, thread_id=None):
+    async def on_header(
+        self,
+        session_id,
+        *,
+        title,
+        model=None,
+        provider=None,
+        sandbox=None,
+        approval=None,
+        thread_id=None,
+    ):
         self.calls.append(("on_header", (session_id,), {"title": title, "model": model}))
 
-    async def on_permission_request(self, session_id, request_id, tool_name, tool_input, suggestions=None):
+    async def on_permission_request(
+        self, session_id, request_id, tool_name, tool_input, suggestions=None
+    ):
         self.calls.append(("on_permission_request", (session_id, request_id, tool_name), {}))
 
-    async def on_permission_resolved(self, session_id, request_id, resolved_by, allowed, message=None):
-        self.calls.append(("on_permission_resolved", (session_id, request_id, resolved_by, allowed), {}))
+    async def on_permission_resolved(
+        self, session_id, request_id, resolved_by, allowed, message=None
+    ):
+        self.calls.append(
+            ("on_permission_resolved", (session_id, request_id, resolved_by, allowed), {})
+        )
 
 
 class FakeRunner:
@@ -86,7 +104,11 @@ class TestRunnerEventsProtocol:
     async def test_on_output(self):
         events = FakeEvents()
         await events.on_output("s1", "combined", "hello", kind="final", is_final=True)
-        assert events.calls[-1] == ("on_output", ("s1", "combined", "hello"), {"kind": "final", "is_final": True})
+        assert events.calls[-1] == (
+            "on_output",
+            ("s1", "combined", "hello"),
+            {"kind": "final", "is_final": True},
+        )
 
     @pytest.mark.anyio
     async def test_on_output_step(self):
@@ -122,7 +144,11 @@ class TestRunnerEventsProtocol:
     async def test_on_metadata(self):
         events = FakeEvents()
         await events.on_metadata("s1", "tokens", {"input": 100}, "input: 100")
-        assert events.calls[-1] == ("on_metadata", ("s1", "tokens", {"input": 100}, "input: 100"), {})
+        assert events.calls[-1] == (
+            "on_metadata",
+            ("s1", "tokens", {"input": 100}, "input: 100"),
+            {},
+        )
 
     @pytest.mark.anyio
     async def test_on_heartbeat(self):
@@ -140,7 +166,11 @@ class TestRunnerEventsProtocol:
     async def test_on_header(self):
         events = FakeEvents()
         await events.on_header("s1", title="Claude Code", model="claude-4")
-        assert events.calls[-1] == ("on_header", ("s1",), {"title": "Claude Code", "model": "claude-4"})
+        assert events.calls[-1] == (
+            "on_header",
+            ("s1",),
+            {"title": "Claude Code", "model": "claude-4"},
+        )
 
     @pytest.mark.anyio
     async def test_on_permission_request(self):

@@ -408,9 +408,7 @@ class DiscordBridge(TextCommandBridge):
             base_session_id = self._session_for_thread(message.channel.id)
 
         try:
-            adapter, directory = await self._parse_new_args(
-                args, base_session_id=base_session_id
-            )
+            adapter, directory = await self._parse_new_args(args, base_session_id=base_session_id)
         except ValueError as e:
             await message.channel.send(str(e))
             return
@@ -669,9 +667,7 @@ class DiscordBridge(TextCommandBridge):
 
             parsed = self.parse_approval_text(text)
             if parsed is not None:
-                ok, msg = await self._handle_approval_text_response(
-                    session_id, pending, parsed
-                )
+                ok, msg = await self._handle_approval_text_response(session_id, pending, parsed)
                 if ok:
                     emoji = "✅" if parsed["allow"] else "❌"
                     await message.channel.send(f"{emoji} {msg}")

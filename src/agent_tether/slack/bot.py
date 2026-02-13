@@ -223,9 +223,7 @@ class SlackBridge(TextCommandBridge):
         base_session_id = self._session_for_thread(thread_ts) if thread_ts else None
 
         try:
-            adapter, directory = await self._parse_new_args(
-                args, base_session_id=base_session_id
-            )
+            adapter, directory = await self._parse_new_args(args, base_session_id=base_session_id)
         except ValueError as e:
             await self._reply(event, str(e))
             return
@@ -338,9 +336,7 @@ class SlackBridge(TextCommandBridge):
             )
             thread_info = await self.create_thread(session_id, session_name)
             try:
-                thread_ts = str(
-                    thread_info.get("thread_ts") or thread_info.get("thread_id") or ""
-                )
+                thread_ts = str(thread_info.get("thread_ts") or thread_info.get("thread_id") or "")
                 if thread_ts:
                     replay = await self._format_external_replay(
                         external["id"], str(external["runner_type"])

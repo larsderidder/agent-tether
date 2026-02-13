@@ -169,9 +169,7 @@ class TextCommandBridge(BridgeInterface):
             directory_raw = " ".join(parts[1:]).strip()
 
         assert directory_raw is not None
-        directory = await self._resolve_directory_arg(
-            directory_raw, base_directory=base_directory
-        )
+        directory = await self._resolve_directory_arg(directory_raw, base_directory=base_directory)
         return adapter, directory
 
     def _parse_list_args(self, args: str) -> tuple[int, str | None]:
@@ -208,11 +206,7 @@ class TextCommandBridge(BridgeInterface):
         if allow and timer == "all":
             self.set_allow_all(session_id)
         elif allow and timer == "dir":
-            _dir = (
-                self._get_session_directory(session_id)
-                if self._get_session_directory
-                else None
-            )
+            _dir = self._get_session_directory(session_id) if self._get_session_directory else None
             if _dir:
                 self.set_allow_directory(_dir)
             else:
