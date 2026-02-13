@@ -11,15 +11,14 @@ import structlog
 import os
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 import re
 from pathlib import Path
-from typing import Any, Callable, Awaitable
+from typing import Callable, Awaitable, Literal
 
 from pydantic import BaseModel
-from typing import Literal
 
 logger = structlog.get_logger(__name__)
 

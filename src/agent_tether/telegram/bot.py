@@ -20,7 +20,6 @@ from agent_tether.base import (
 )
 from agent_tether.telegram.formatting import (
     chunk_message,
-    escape_markdown,
     markdown_to_telegram_html,
     strip_tool_markers,
 )

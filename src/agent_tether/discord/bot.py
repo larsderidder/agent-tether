@@ -1,32 +1,30 @@
 """Discord bridge implementation with command handling and session threading."""
 
 import asyncio
-import structlog
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+import structlog
 
 from agent_tether.base import (
     ApprovalRequest,
     BridgeCallbacks,
-    BridgeInterface,
     BridgeConfig,
     GetSessionDirectory,
     GetSessionInfo,
     OnSessionBound,
     _EXTERNAL_MAX_FETCH,
-    _EXTERNAL_REPLAY_LIMIT,
-    _EXTERNAL_REPLAY_MAX_CHARS,
 )
 from agent_tether.discord.pairing_state import (
     DiscordPairingState,
     load_or_create as load_pairing_state,
     save as save_pairing_state,
 )
-from agent_tether.thread_state import load_mapping, save_mapping
+from agent_tether.text_command_bridge import TextCommandBridge
 
 logger = structlog.get_logger(__name__)
 
-_DISCORD_THREAD_NAME_MAX_LEN = 64
 _DISCORD_MSG_LIMIT = 2000
 
 
@@ -39,7 +37,7 @@ class DiscordConfig:
     pairing_code: str | None = None
 
 
-class DiscordBridge(BridgeInterface):
+class DiscordBridge(TextCommandBridge):
     """Discord bridge that routes agent events to Discord threads.
 
     Commands (in main channel): !help, !status, !list, !attach, !stop, !usage
@@ -57,22 +55,20 @@ class DiscordBridge(BridgeInterface):
         get_session_info: GetSessionInfo | None = None,
         on_session_bound: OnSessionBound | None = None,
     ):
+        dc = discord_config or DiscordConfig()
+        data_dir = (config or BridgeConfig()).data_dir or "."
         super().__init__(
             config=config,
             callbacks=callbacks,
             get_session_directory=get_session_directory,
             get_session_info=get_session_info,
             on_session_bound=on_session_bound,
+            thread_name_path=Path(data_dir) / "discord_threads.json",
         )
-        dc = discord_config or DiscordConfig()
         self._bot_token = bot_token
         self._channel_id = channel_id
-        self._client: any = None
+        self._client: Any = None
         self._thread_ids: dict[str, int] = {}  # session_id -> thread_id
-        data_dir = self._config.data_dir or "."
-        self._thread_name_path = Path(data_dir) / "discord_threads.json"
-        self._thread_names: dict[str, str] = load_mapping(path=self._thread_name_path)
-        self._used_thread_names: set[str] = set(self._thread_names.values())
         # Pairing / allowlist
         self._pairing_required = dc.require_pairing
         self._allowed_user_ids = dc.allowed_user_ids or []
@@ -80,7 +76,7 @@ class DiscordBridge(BridgeInterface):
         self._pairing_state: DiscordPairingState | None = None
         self._paired_user_ids: set[int] = set()
         self._pairing_code: str | None = None
-        # Background typing indicator loops: session_id → asyncio.Task
+        # Background typing indicator loops: session_id -> asyncio.Task
         self._typing_tasks: dict[str, asyncio.Task] = {}
         self._fixed_pairing_code = dc.pairing_code
 
@@ -135,14 +131,12 @@ class DiscordBridge(BridgeInterface):
         self._client = discord.Client(intents=intents)
 
         @self._client.event
-        async def on_ready():
+        async def on_ready() -> None:
             logger.info("Discord client ready", user=self._client.user)
 
         @self._client.event
-        async def on_message(message):
+        async def on_message(message: Any) -> None:
             await self._handle_message(message)
-
-        import asyncio
 
         asyncio.create_task(self._client.start(self._bot_token))
 
@@ -168,22 +162,8 @@ class DiscordBridge(BridgeInterface):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _pick_unique_thread_name(self, base_name: str) -> str:
-        base_name = (base_name or "Session").strip() or "Session"
-        base_name = base_name[:_DISCORD_THREAD_NAME_MAX_LEN]
-        if base_name not in self._used_thread_names:
-            return base_name
-
-        for i in range(2, 100):
-            suffix = f" {i}"
-            avail = max(1, _DISCORD_THREAD_NAME_MAX_LEN - len(suffix))
-            candidate = (base_name[:avail] + suffix)[:_DISCORD_THREAD_NAME_MAX_LEN]
-            if candidate not in self._used_thread_names:
-                return candidate
-
-        return base_name
-
     def _is_authorized_user_id(self, user_id: int | None) -> bool:
+        """Check if a Discord user is authorized to use this bridge."""
         if not user_id:
             return False
         if int(user_id) in self._allowed_user_ids:
@@ -197,7 +177,8 @@ class DiscordBridge(BridgeInterface):
             return True
         return False
 
-    async def _send_not_paired(self, message: any) -> None:
+    async def _send_not_paired(self, message: Any) -> None:
+        """Send a 'not authorized' message."""
         if not self._pairing_required:
             await message.channel.send(
                 "🔒 Not authorized. Pairing is not required, but an allowlist/pairing may be configured."
@@ -208,6 +189,7 @@ class DiscordBridge(BridgeInterface):
         )
 
     def _ensure_pairing_state_loaded(self) -> None:
+        """Lazily load or create the pairing state file."""
         if self._pairing_state:
             return
         fixed_code = self._fixed_pairing_code
@@ -220,76 +202,8 @@ class DiscordBridge(BridgeInterface):
         if not self._channel_id and self._pairing_state.control_channel_id:
             self._channel_id = int(self._pairing_state.control_channel_id)
 
-    def _make_external_thread_name(self, *, directory: str, session_id: str) -> str:
-        # Match Telegram's naming style: directory name, upper-cased, and ensure
-        # uniqueness by appending numbers ("Repo", "Repo 2", ...).
-        dir_short = (directory or "").rstrip("/").rsplit("/", 1)[-1] or "Session"
-        base_name = (dir_short[:1].upper() + dir_short[1:])[:_DISCORD_THREAD_NAME_MAX_LEN]
-        return self._pick_unique_thread_name(base_name)
-
-    async def _send_external_session_replay(
-        self, *, thread_id: int, external_id: str, runner_type: str
-    ) -> None:
-        """Send recent external session history into the Discord thread."""
-        if not self._client:
-            return
-
-        try:
-            payload = await self._callbacks.get_external_history(
-                external_id, runner_type, _EXTERNAL_REPLAY_LIMIT
-            )
-            if not payload:
-                return
-        except Exception:
-            logger.exception(
-                "Failed to fetch external session history for replay",
-                external_id=external_id,
-                runner_type=runner_type,
-            )
-            return
-
-        messages = payload.get("messages") or []
-        if not messages:
-            return
-
-        lines: list[str] = [
-            f"Recent history (last {min(_EXTERNAL_REPLAY_LIMIT, len(messages))} messages):\n"
-        ]
-        for i, msg in enumerate(messages, 1):
-            role = str(msg.get("role") or "").lower()
-            prefix = (
-                "👤"
-                if role == "user"
-                else ("🤖" if role == "assistant" else role[:1].upper() or "?")
-            )
-            content = (msg.get("content") or "").strip()
-            thinking = (msg.get("thinking") or "").strip()
-            # Truncate each message more aggressively for Discord's 2000 char limit
-            if content and len(content) > 300:
-                content = content[:300] + "..."
-            if thinking and len(thinking) > 150:
-                thinking = thinking[:150] + "..."
-            if content:
-                lines.append(f"{i}. {prefix}: {content}")
-            if thinking:
-                lines.append(f"   {prefix} (thinking): {thinking}")
-
-        text = "\n".join(lines)
-        # Discord has a 2000 char limit per message
-        if len(text) > 1900:
-            text = text[:1900] + "..."
-
-        try:
-            thread = self._client.get_channel(thread_id)
-            if thread:
-                await thread.send(text)
-        except Exception:
-            logger.exception(
-                "Failed to send Discord external session replay",
-                external_id=external_id,
-            )
-
     def _session_for_thread(self, thread_id: int) -> str | None:
+        """Look up the session ID for a Discord thread ID."""
         for sid, tid in self._thread_ids.items():
             if tid == thread_id:
                 return sid
@@ -299,7 +213,7 @@ class DiscordBridge(BridgeInterface):
     # Message router
     # ------------------------------------------------------------------
 
-    async def _handle_message(self, message: any) -> None:
+    async def _handle_message(self, message: Any) -> None:
         """Route incoming Discord messages to commands or session input."""
         try:
             import discord
@@ -318,7 +232,7 @@ class DiscordBridge(BridgeInterface):
             await self._dispatch_command(message, text)
             return
 
-        # Messages in threads → session input or thread commands
+        # Messages in threads -> session input or thread commands
         if isinstance(message.channel, discord.Thread):
             if text.startswith("!"):
                 await self._dispatch_command(message, text)
@@ -332,7 +246,7 @@ class DiscordBridge(BridgeInterface):
             await self._forward_input(message, session_id, text)
             return
 
-        # Messages in the configured channel starting with ! → commands
+        # Messages in the configured channel starting with ! -> commands
         if self._channel_id and message.channel.id == self._channel_id and text.startswith("!"):
             await self._dispatch_command(message, text)
             return
@@ -341,7 +255,8 @@ class DiscordBridge(BridgeInterface):
         if not self._channel_id and text.lower().startswith("!setup"):
             await self._dispatch_command(message, text)
 
-    async def _dispatch_command(self, message: any, text: str) -> None:
+    async def _dispatch_command(self, message: Any, text: str) -> None:
+        """Parse and dispatch a !command."""
         parts = text.split(None, 1)
         cmd = parts[0].lower()
         args = parts[1].strip() if len(parts) > 1 else ""
@@ -385,7 +300,8 @@ class DiscordBridge(BridgeInterface):
     # Commands
     # ------------------------------------------------------------------
 
-    async def _cmd_help(self, message: any) -> None:
+    async def _cmd_help(self, message: Any) -> None:
+        """Handle !help."""
         text = (
             "Tether Commands:\n\n"
             "!status — List all sessions\n"
@@ -402,11 +318,8 @@ class DiscordBridge(BridgeInterface):
         )
         await message.channel.send(text)
 
-    async def _cmd_setup(self, message: any, args: str) -> None:
-        """Configure the current channel as the bot's control channel.
-
-        This avoids requiring users to copy a channel ID manually.
-        """
+    async def _cmd_setup(self, message: Any, args: str) -> None:
+        """Configure the current channel as the bot's control channel."""
         code = (args or "").strip()
         if not code:
             await message.channel.send("Usage: `!setup <code>`")
@@ -417,7 +330,6 @@ class DiscordBridge(BridgeInterface):
             await message.channel.send("Invalid setup code.")
             return
 
-        # Record this channel as the control channel.
         channel_id = getattr(getattr(message, "channel", None), "id", None)
         if not channel_id:
             await message.channel.send("Could not read this channel id.")
@@ -439,8 +351,8 @@ class DiscordBridge(BridgeInterface):
             "✅ Setup complete. This channel is now the control channel. Try `!help`."
         )
 
-    async def _cmd_pair(self, message: any, args: str) -> None:
-        # Allow pairing via DM, or from the configured control channel.
+    async def _cmd_pair(self, message: Any, args: str) -> None:
+        """Handle !pair to authorize a Discord user."""
         guild = getattr(message, "guild", None)
         channel_id = getattr(getattr(message, "channel", None), "id", None)
         if guild is not None and channel_id != self._channel_id:
@@ -474,7 +386,8 @@ class DiscordBridge(BridgeInterface):
 
         await message.channel.send("✅ Paired. You can now use Tether commands.")
 
-    async def _cmd_pair_status(self, message: any) -> None:
+    async def _cmd_pair_status(self, message: Any) -> None:
+        """Handle !pair-status."""
         user_id = getattr(getattr(message, "author", None), "id", None)
         authorized = self._is_authorized_user_id(user_id)
         await message.channel.send(
@@ -483,76 +396,24 @@ class DiscordBridge(BridgeInterface):
             f"Your user id: {user_id}"
         )
 
-    async def _cmd_new(self, message: any, args: str) -> None:
-        """Create a new session and Discord thread.
-
-        Usage:
-        - In a session thread:
-          - !new
-          - !new <agent>
-          - !new <directory-name>
-        - In main channel:
-          - !new <agent> <directory>
-          - !new <directory>
-        """
+    async def _cmd_new(self, message: Any, args: str) -> None:
+        """Create a new session and Discord thread."""
         try:
             import discord
         except ImportError:
             return
 
-        parts = (args or "").split()
-
         base_session_id: str | None = None
-        base_directory: str | None = None
-        base_adapter: str | None = None
         if isinstance(message.channel, discord.Thread):
             base_session_id = self._session_for_thread(message.channel.id)
-        if base_session_id and self._get_session_info:
-            s = self._get_session_info(base_session_id)
-            if s:
-                base_directory = s.get("directory")
-                base_adapter = s.get("adapter")
-
-        adapter: str | None = None
-        directory_raw: str | None = None
-
-        if not parts:
-            if not base_directory:
-                await message.channel.send(
-                    "Usage: !new <agent> <directory>\nOr, inside a session thread: !new or !new <agent>"
-                )
-                return
-            adapter = base_adapter
-            directory_raw = base_directory
-        elif len(parts) == 1:
-            token = parts[0]
-            maybe_adapter = self._agent_to_adapter(token)
-            if base_directory:
-                if maybe_adapter:
-                    adapter = maybe_adapter
-                    directory_raw = base_directory
-                else:
-                    adapter = base_adapter
-                    directory_raw = token
-            else:
-                if maybe_adapter:
-                    await message.channel.send("Usage: !new <agent> <directory>")
-                    return
-                directory_raw = token
-        else:
-            adapter = self._agent_to_adapter(parts[0])
-            if not adapter:
-                await message.channel.send(
-                    "Unknown agent. Use: claude, codex, claude_auto, claude_subprocess, claude_api, codex_sdk_sidecar"
-                )
-                return
-            directory_raw = " ".join(parts[1:]).strip()
 
         try:
-            assert directory_raw is not None
-            directory = await self._resolve_directory_arg(
-                directory_raw, base_directory=base_directory
+            adapter, directory = await self._parse_new_args(
+                args, base_session_id=base_session_id
             )
+        except ValueError as e:
+            await message.channel.send(str(e))
+            return
         except Exception as e:
             await message.channel.send(f"Invalid directory: {e}")
             return
@@ -582,10 +443,10 @@ class DiscordBridge(BridgeInterface):
         except Exception:
             thread_id = 0
         if thread_id:
-            # Mention the thread so it's easy to find.
             await message.channel.send(f"🧵 Open thread: <#{thread_id}>")
 
-    async def _cmd_status(self, message: any) -> None:
+    async def _cmd_status(self, message: Any) -> None:
+        """Handle !status."""
         try:
             sessions = await self._callbacks.list_sessions()
         except Exception:
@@ -604,17 +465,9 @@ class DiscordBridge(BridgeInterface):
             lines.append(f"  {emoji} {name}")
         await message.channel.send("\n".join(lines))
 
-    async def _cmd_list(self, message: any, args: str) -> None:
-        page = 1
-        query: str | None = None
-        if args:
-            first = args.split()[0]
-            try:
-                page = int(first)
-                query = self._external_query
-            except ValueError:
-                page = 1
-                query = args.strip()
+    async def _cmd_list(self, message: Any, args: str) -> None:
+        """Handle !list."""
+        page, query = self._parse_list_args(args)
 
         try:
             self._cached_external = await self._callbacks.list_external_sessions(
@@ -632,7 +485,8 @@ class DiscordBridge(BridgeInterface):
         text, _, _ = self._format_external_page(page)
         await message.channel.send(text)
 
-    async def _cmd_attach(self, message: any, args: str) -> None:
+    async def _cmd_attach(self, message: Any, args: str) -> None:
+        """Handle !attach."""
         if not args:
             await message.channel.send("Usage: !attach <number> [force]\n\nRun !list first.")
             return
@@ -676,10 +530,7 @@ class DiscordBridge(BridgeInterface):
                         thread_id=existing_thread_id,
                     )
                     self._thread_ids.pop(session_id, None)
-                    name = self._thread_names.pop(session_id, None)
-                    if name:
-                        self._used_thread_names.discard(name)
-                        save_mapping(path=self._thread_name_path, mapping=self._thread_names)
+                    self._release_thread_name(session_id)
                 else:
                     # Verify the thread is still accessible
                     thread_ok = False
@@ -703,10 +554,7 @@ class DiscordBridge(BridgeInterface):
                             thread_id=existing_thread_id,
                         )
                         self._thread_ids.pop(session_id, None)
-                        name = self._thread_names.pop(session_id, None)
-                        if name:
-                            self._used_thread_names.discard(name)
-                            save_mapping(path=self._thread_name_path, mapping=self._thread_names)
+                        self._release_thread_name(session_id)
 
             # Create thread
             session_name = self._make_external_thread_name(
@@ -717,13 +565,24 @@ class DiscordBridge(BridgeInterface):
             try:
                 thread_id = int(thread_info.get("thread_id") or 0)
                 if thread_id:
-                    # Post a clickable link to the thread so users can find it easily.
                     await message.channel.send(f"🧵 Open thread: <#{thread_id}>")
-                    await self._send_external_session_replay(
-                        thread_id=thread_id,
-                        external_id=external["id"],
-                        runner_type=str(external["runner_type"]),
+                    replay = await self._format_external_replay(
+                        external["id"],
+                        str(external["runner_type"]),
+                        content_limit=300,
+                        thinking_limit=150,
+                        total_limit=1900,
                     )
+                    if replay:
+                        try:
+                            thread = self._client.get_channel(thread_id)
+                            if thread:
+                                await thread.send(replay)
+                        except Exception:
+                            logger.exception(
+                                "Failed to send Discord external session replay",
+                                external_id=external["id"],
+                            )
             except Exception:
                 logger.exception("Failed to replay external session history into Discord thread")
 
@@ -741,7 +600,8 @@ class DiscordBridge(BridgeInterface):
             logger.exception("Failed to attach to external session")
             await message.channel.send(f"Failed to attach: {e}")
 
-    async def _cmd_stop(self, message: any) -> None:
+    async def _cmd_stop(self, message: Any) -> None:
+        """Handle !stop."""
         import discord
 
         if not isinstance(message.channel, discord.Thread):
@@ -763,7 +623,7 @@ class DiscordBridge(BridgeInterface):
             logger.exception("Failed to interrupt session")
             await message.channel.send(f"Failed to interrupt: {e}")
 
-    async def _cmd_usage(self, message: any) -> None:
+    async def _cmd_usage(self, message: Any) -> None:
         """Show token usage for the session in the current thread."""
         try:
             import discord
@@ -790,15 +650,15 @@ class DiscordBridge(BridgeInterface):
     # Session input forwarding
     # ------------------------------------------------------------------
 
-    async def _forward_input(self, message: any, session_id: str, text: str) -> None:
+    async def _forward_input(self, message: Any, session_id: str, text: str) -> None:
+        """Forward a user message as session input, handling approvals."""
         if not self._is_authorized_user_id(getattr(message.author, "id", None)):
             await self._send_not_paired(message)
             return
 
-        # Check if this is an approval response for a pending permission
         pending = self.get_pending_permission(session_id)
         if pending:
-            # Choice requests: allow "1"/"2"/... or exact label; send as normal input.
+            # Choice requests: allow "1"/"2"/... or exact label.
             if pending.kind == "choice":
                 selected = self.parse_choice_text(session_id, text)
                 if selected:
@@ -809,7 +669,14 @@ class DiscordBridge(BridgeInterface):
 
             parsed = self.parse_approval_text(text)
             if parsed is not None:
-                await self._handle_approval_text(message, session_id, pending, parsed)
+                ok, msg = await self._handle_approval_text_response(
+                    session_id, pending, parsed
+                )
+                if ok:
+                    emoji = "✅" if parsed["allow"] else "❌"
+                    await message.channel.send(f"{emoji} {msg}")
+                else:
+                    await message.channel.send("❌ Failed. Request may have expired.")
                 return
 
         try:
@@ -824,52 +691,8 @@ class DiscordBridge(BridgeInterface):
             logger.exception("Failed to forward human input", session_id=session_id)
             await message.channel.send("Failed to send input.")
 
-    async def _handle_approval_text(
-        self, message: any, session_id: str, request: ApprovalRequest, parsed: dict
-    ) -> None:
-        """Handle a parsed approval text response."""
-        allow = parsed["allow"]
-        reason = parsed.get("reason")
-        timer = parsed.get("timer")
-
-        if allow and timer == "all":
-            self.set_allow_all(session_id)
-        elif allow and timer == "dir":
-            _dir = self._get_session_directory(session_id) if self._get_session_directory else None
-            if _dir:
-                self.set_allow_directory(_dir)
-            else:
-                self.set_allow_all(session_id)
-        elif allow and timer:
-            self.set_allow_tool(session_id, timer)
-
-        if allow:
-            msg = "Approved"
-            if timer == "all":
-                msg = "Allow All (30m)"
-            elif timer == "dir":
-                msg = "Allow dir (30m)"
-            elif timer:
-                msg = f"Allow {timer} (30m)"
-        else:
-            msg = f"Denied: {reason}" if reason else "Denied"
-
-        ok = await self._respond_to_permission(
-            session_id,
-            request.request_id,
-            allow=allow,
-            message=msg,
-        )
-        if ok:
-            if allow:
-                await message.channel.send(f"✅ {msg}")
-            else:
-                await message.channel.send(f"❌ {msg}")
-        else:
-            await message.channel.send("❌ Failed. Request may have expired.")
-
     # ------------------------------------------------------------------
-    # Bridge interface (outgoing events)
+    # Typing indicator
     # ------------------------------------------------------------------
 
     async def _typing_loop(self, session_id: str, thread_id: int) -> None:
@@ -920,6 +743,10 @@ class DiscordBridge(BridgeInterface):
     async def on_typing_stopped(self, session_id: str) -> None:
         """Stop the typing indicator for the session."""
         self._stop_typing(session_id)
+
+    # ------------------------------------------------------------------
+    # Bridge interface (outgoing events)
+    # ------------------------------------------------------------------
 
     async def on_output(self, session_id: str, text: str, metadata: dict | None = None) -> None:
         """Send output text to Discord thread."""
@@ -1054,10 +881,7 @@ class DiscordBridge(BridgeInterface):
             raise RuntimeError("Discord client not initialized")
 
         try:
-            # Reserve name for uniqueness within this bridge instance and across restarts.
-            self._thread_names[session_id] = session_name
-            self._used_thread_names.add(session_name)
-            save_mapping(path=self._thread_name_path, mapping=self._thread_names)
+            self._reserve_thread_name(session_id, session_name)
 
             channel = self._client.get_channel(self._channel_id)
             if not channel:
@@ -1095,17 +919,10 @@ class DiscordBridge(BridgeInterface):
             logger.exception("Failed to create Discord thread", session_id=session_id)
             # Best-effort rollback if thread creation failed.
             if self._thread_names.get(session_id) == session_name:
-                self._thread_names.pop(session_id, None)
-                self._used_thread_names.discard(session_name)
-                save_mapping(path=self._thread_name_path, mapping=self._thread_names)
+                self._release_thread_name(session_id)
             raise RuntimeError(f"Failed to create Discord thread: {e}")
 
     async def on_session_removed(self, session_id: str) -> None:
-        # Stop typing indicator
+        """Clean up when a session is deleted."""
         self._stop_typing(session_id)
-        # Clean up thread name tracking
-        name = self._thread_names.pop(session_id, None)
-        if name:
-            self._used_thread_names.discard(name)
-            save_mapping(path=self._thread_name_path, mapping=self._thread_names)
         await super().on_session_removed(session_id)

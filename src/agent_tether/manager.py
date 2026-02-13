@@ -135,6 +135,3 @@ class BridgeManager:
 
         return await bridge.create_thread(session_id, session_name)
 
-
-# Global bridge manager instance
-bridge_manager = BridgeManager()
