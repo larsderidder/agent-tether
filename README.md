@@ -1,14 +1,16 @@
 # agent-tether
 
-Connect to your AI coding agents through Telegram, Slack, and Discord. Control them from your phone while they work on your laptop.
+Connect AI coding agents to human oversight through Telegram, Slack, and Discord.
 
-A Python library that handles the chat-platform integration for AI agent supervision: thread management, approval flows with inline buttons, auto-approve timers, message formatting, and command handling. You provide callbacks for your application logic.
+A Python library extracted from [Tether](https://github.com/larsderidder/tether) that provides chat platform bridges for supervising AI agents. Each bridge handles platform-specific formatting, thread management, approval flows with inline buttons, auto-approve timers, and command handling.
 
 **Use Cases:**
-- Monitor Claude/Codex/Aider from your phone while agents run locally
+- Monitor Claude Code or Codex sessions from your phone while agents run locally
 - Get approval requests as Telegram notifications with one-tap approve/deny
-- Set auto-approve timers for trusted operations
+- Set auto-approve timers (per-session, per-tool, per-directory)
 - Send additional input or stop agents remotely
+
+> **Note:** This library is designed to work with a running [Tether](https://github.com/larsderidder/tether) server. The bridges communicate with Tether's internal API for session management, permission handling, and input forwarding.
 
 ## Install
 
@@ -19,113 +21,122 @@ pip install agent-tether[discord]    # Discord support
 pip install agent-tether[all]        # All platforms
 ```
 
+## Architecture
+
+```
+Tether Server (localhost:8787)
+    │
+    ├── agent-tether bridges
+    │     ├── TelegramBridge  → Telegram forum topics
+    │     ├── SlackBridge     → Slack threads
+    │     └── DiscordBridge   → Discord threads
+    │
+    ├── BridgeManager         → Routes events to the right bridge
+    └── BridgeSubscriber      → Consumes store events, forwards to bridges
+```
+
+### Core Components
+
+- **`BridgeInterface`**: Abstract base class with shared logic for auto-approve, approval parsing, error debouncing, and formatting
+- **`BridgeManager`**: Routes output, approvals, and status changes to the correct platform bridge
+- **`BridgeSubscriber`**: Consumes events from a store subscriber queue and forwards them to bridges
+- **`BridgeConfig`**: Dependency-free configuration (API port, data directory, error debounce)
+
 ## Quick Start
 
 ```python
-import asyncio
-from agent_tether import TelegramBridge, Handlers
+from agent_tether import (
+    BridgeConfig,
+    BridgeManager,
+    BridgeSubscriber,
+    TelegramBridge,
+)
+from agent_tether.telegram.state import StateManager
 
-async def on_input(thread_id: str, text: str, username: str | None):
-    print(f"[{thread_id}] {username}: {text}")
+# Configure
+config = BridgeConfig(api_port=8787, data_dir="/tmp/tether")
 
-async def on_approval_response(thread_id: str, request_id: str, approved: bool, **kwargs):
-    print(f"[{thread_id}] {'Approved' if approved else 'Denied'} {request_id}")
-
-bridge = TelegramBridge(
-    token="BOT_TOKEN",
+# Create a Telegram bridge
+telegram = TelegramBridge(
+    bot_token="BOT_TOKEN",
     forum_group_id=123456,
-    handlers=Handlers(
-        on_input=on_input,
-        on_approval_response=on_approval_response,
-    ),
+    config=config,
+    get_session_directory=lambda sid: "/home/user/project",
 )
 
-async def main():
-    await bridge.start()
+# Register with manager
+manager = BridgeManager()
+manager.register_bridge("telegram", telegram)
 
-    thread_id = await bridge.create_thread("My Agent Task")
-    await bridge.send_output(thread_id, "Starting work on your request...")
-
-    await bridge.send_approval_request(
-        thread_id,
-        request_id="req_123",
-        tool_name="Bash",
-        description='{"command": "rm -rf /tmp/cache"}',
-    )
-
-    await bridge.wait_until_stopped()
-
-asyncio.run(main())
+# Route events
+await manager.route_output("sess_1", "Starting work...", "telegram")
+await manager.route_status("sess_1", "running", "telegram")
 ```
 
-### Runner Protocol Example
+### Approval Parsing
+
+Bridges parse human text into approval responses:
 
 ```python
-from agent_tether.runner import Runner, RunnerEvents, RunnerRegistry
+from agent_tether import BridgeInterface
 
-# Implement event callbacks
-class MyEventHandler:
-    async def on_output(self, session_id, stream, text, **kwargs):
-        print(f"[{session_id}] {text}", end="")
-    
-    async def on_error(self, session_id, code, message):
-        print(f"ERROR: {message}")
-    
-    async def on_exit(self, session_id, exit_code):
-        print(f"Session {session_id} exited with code {exit_code}")
-    
-    async def on_permission_request(self, session_id, request_id, tool_name, tool_input, **kwargs):
-        print(f"Permission requested for {tool_name}")
-    
-    # ... other event callbacks
+# These are parsed by bridges when users reply in chat
+bridge.parse_approval_text("allow")       # → {"allow": True, "timer": None}
+bridge.parse_approval_text("deny: risky") # → {"allow": False, "reason": "risky"}
+bridge.parse_approval_text("allow all")   # → {"allow": True, "timer": "all"}
+bridge.parse_approval_text("allow Bash")  # → {"allow": True, "timer": "Bash"}
+```
 
-# Register runners
-registry = RunnerRegistry()
+### Auto-Approve Timers
 
-def my_runner_factory(events, config):
-    # Return a Runner implementation
-    return MyCustomRunner(events, **config)
+```python
+# Auto-approve all tools for this session (30 min)
+bridge.set_allow_all("sess_1")
 
-registry.register("my-runner", my_runner_factory)
+# Auto-approve only Bash for this session (30 min)
+bridge.set_allow_tool("sess_1", "Bash")
 
-# Create and use runner
-events = MyEventHandler()
-runner = registry.create("my-runner", events, api_key="...", model="...")
+# Auto-approve all sessions in a directory (30 min)
+bridge.set_allow_directory("/home/user/project")
 
-await runner.start("sess_1", "Build a web app", approval_choice=1)
-await runner.send_input("sess_1", "Add a login page")
-await runner.stop("sess_1")
+# Check if a request should be auto-approved
+reason = bridge.check_auto_approve("sess_1", "Bash")
+# Returns "Allow All", "Allow Bash", "Allow dir project", or None
 ```
 
 ## Features
 
 ### Chat Platform Bridges
-- **Telegram** — Forum topics, inline keyboard approval buttons, typing indicators, HTML formatting
-- **Slack** — Socket mode, threaded conversations, text-based approval commands
-- **Discord** — Channel threads, pairing/authorization system, text-based approvals
-- **Approval engine** — Auto-approve timers (per-thread, per-tool, per-directory), batched notifications
-- **Commands** — Built-in `/help`, `/stop`, `/status`, `/usage` + custom command registry
-- **Formatting** — Tool input JSON → readable text, markdown conversion, message chunking
+- **Telegram**: Forum topics, inline keyboard approval buttons, typing indicators, HTML formatting
+- **Slack**: Socket mode, threaded conversations, text-based approval commands
+- **Discord**: Channel threads, pairing/authorization system, text-based approvals
 
-### Runner Protocol
-- **Protocol definitions** — `Runner` and `RunnerEvents` interfaces for agent backends
-- **RunnerRegistry** — Factory pattern for discovering and creating runners
-- **Pluggable adapters** — Clean protocol for implementing custom agent backends
-- **Event-driven** — Runners report progress via callbacks (output, errors, permissions, etc.)
+### Shared Bridge Logic
+- **Auto-approve engine**: Per-session, per-tool, and per-directory timers (30 min default)
+- **Approval parsing**: Text commands (allow/deny/proceed/cancel) with tool and directory timers
+- **Choice parsing**: Numeric or label-based selection for multi-option prompts
+- **Error debouncing**: Suppress rapid-fire error notifications
+- **Notification batching**: Collapse rapid auto-approvals into single messages
+- **External session pagination**: Browse and attach to running Claude Code/Codex sessions
+- **Formatting**: Tool input JSON to readable markdown, message chunking
+
+### Commands (available in all bridges)
+- `/help` or `!help`: Show available commands
+- `/status` or `!status`: List all sessions
+- `/list` or `!list`: List external sessions (Claude Code, Codex)
+- `/attach` or `!attach`: Attach to an external session
+- `/new` or `!new`: Start a new session
+- `/stop` or `!stop`: Interrupt the current session
+- `/usage` or `!usage`: Show token usage and cost
 
 ## Documentation
 
-- **[CHANGELOG.md](CHANGELOG.md)** — Version history and changes
+- **[CHANGELOG.md](CHANGELOG.md)**: Version history and changes
 
 ## Contributing
 
 Contributions welcome! Please feel free to submit a Pull Request.
 
-## Related Projects
-
-This library is extracted from [Tether](https://github.com/larsderidder/tether), a full-featured control plane for supervising AI coding agents.
-
 ## License
 
-MIT - see [LICENSE](LICENSE) for details
-
+MIT. See [LICENSE](LICENSE) for details.
