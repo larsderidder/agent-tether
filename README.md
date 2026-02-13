@@ -16,7 +16,7 @@ A Python library extracted from [Tether](https://github.com/larsderidder/tether)
 
 ```bash
 pip install agent-tether[telegram]   # Telegram support
-pip install agent-tether[slack]      # Slack support
+pip install agent-tether[slack]      # Slack support (experimental)
 pip install agent-tether[discord]    # Discord support
 pip install agent-tether[all]        # All platforms
 ```
@@ -28,7 +28,7 @@ Tether Server (localhost:8787)
     │
     ├── agent-tether bridges
     │     ├── TelegramBridge  → Telegram forum topics
-    │     ├── SlackBridge     → Slack threads
+    │     ├── SlackBridge     → Slack threads (experimental)
     │     └── DiscordBridge   → Discord threads
     │
     ├── BridgeManager         → Routes events to the right bridge
@@ -108,7 +108,7 @@ reason = bridge.check_auto_approve("sess_1", "Bash")
 
 ### Chat Platform Bridges
 - **Telegram**: Forum topics, inline keyboard approval buttons, typing indicators, HTML formatting
-- **Slack**: Socket mode, threaded conversations, text-based approval commands
+- **Slack** *(experimental)*: Socket mode, threaded conversations, text-based approval commands
 - **Discord**: Channel threads, pairing/authorization system, text-based approvals
 
 ### Shared Bridge Logic
