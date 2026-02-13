@@ -26,15 +26,7 @@ logger = structlog.get_logger(__name__)
 
 @dataclass
 class BridgeConfig:
-    """Configuration for bridge instances.
-
-    Replaces the global ``settings`` object so that bridges have no
-    dependency on Tether internals.
-    """
-
-    # API access (for internal API calls back to the host)
-    api_token: str | None = None
-    api_port: int = 8787
+    """Configuration for bridge instances."""
 
     # Data directory for state files
     data_dir: str = ""
@@ -57,6 +49,50 @@ GetSessionInfo = Callable[[str], dict | None]
 # Callback for when a session is bound to a platform thread.
 # (session_id, platform, thread_id)
 OnSessionBound = Callable[[str, str, str | None], Awaitable[None]]
+
+
+@dataclass
+class BridgeCallbacks:
+    """Callbacks that bridges invoke when the user takes action.
+
+    The host application (e.g. Tether) provides implementations.
+    This decouples bridges from any specific backend or API.
+    """
+
+    # Session lifecycle
+    create_session: Callable[..., Awaitable[dict]]
+    """Create a new session. Kwargs: directory, platform, adapter, session_name. Returns session dict."""
+
+    send_input: Callable[[str, str], Awaitable[None]]
+    """Send human input to a session. (session_id, text). Should start the session if in CREATED state."""
+
+    stop_session: Callable[[str], Awaitable[None]]
+    """Interrupt/stop a session. (session_id)."""
+
+    # Permissions
+    respond_to_permission: Callable[..., Awaitable[bool]]
+    """Respond to a permission request. (session_id, request_id, allow, message). Returns success."""
+
+    # Queries
+    list_sessions: Callable[[], Awaitable[list[dict]]]
+    """List all active sessions. Returns list of session dicts."""
+
+    get_usage: Callable[[str], Awaitable[dict]]
+    """Get token/cost usage for a session. (session_id). Returns usage dict."""
+
+    check_directory: Callable[[str], Awaitable[dict]]
+    """Check if a directory path exists. (path). Returns dict with 'exists', 'path' keys."""
+
+    # External sessions
+    list_external_sessions: Callable[..., Awaitable[list[dict]]]
+    """List discoverable external sessions. Kwargs: limit. Returns list of session dicts."""
+
+    get_external_history: Callable[..., Awaitable[dict | None]]
+    """Get history for an external session. (external_id, runner_type, limit). Returns detail dict or None."""
+
+    attach_external: Callable[..., Awaitable[dict]]
+    """Attach to an external session. (external_id, runner_type, directory). Returns session dict."""
+
 
 _EXTERNAL_PAGE_SIZE = 10
 _EXTERNAL_MAX_FETCH = 200
@@ -130,11 +166,13 @@ class BridgeInterface(ABC):
     def __init__(
         self,
         config: BridgeConfig | None = None,
+        callbacks: BridgeCallbacks | None = None,
         get_session_directory: GetSessionDirectory | None = None,
         get_session_info: GetSessionInfo | None = None,
         on_session_bound: OnSessionBound | None = None,
     ) -> None:
         self._config = config or BridgeConfig()
+        self._callbacks = callbacks
         self._get_session_directory = get_session_directory
         self._get_session_info = get_session_info
         self._on_session_bound = on_session_bound
@@ -156,22 +194,6 @@ class BridgeInterface(ABC):
         self._auto_approve_flush_tasks: dict[str, asyncio.Task] = {}
         # Delay before flushing buffered auto-approve notifications (seconds)
         self._auto_approve_flush_delay: float = 1.5
-
-    # ------------------------------------------------------------------
-    # API helpers (shared across all bridges)
-    # ------------------------------------------------------------------
-
-    def _api_headers(self) -> dict[str, str]:
-        """Build auth headers for internal API calls."""
-        headers: dict[str, str] = {}
-        token = self._config.api_token
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        return headers
-
-    def _api_url(self, path: str) -> str:
-        """Build a localhost API URL."""
-        return f"http://localhost:{self._config.api_port}/api{path}"
 
     # ------------------------------------------------------------------
     # Formatting helpers (shared across bridges)
@@ -303,75 +325,24 @@ class BridgeInterface(ABC):
         adapter: str | None = None,
         session_name: str | None = None,
     ) -> dict:
-        """Create a new Tether session via the internal API.
+        """Create a new session via callbacks.
 
-        Returns the raw SessionResponse JSON payload.
+        Returns the session dict from the host.
         """
-        import httpx
-
-        payload: dict[str, Any] = {
-            "directory": directory,
-            "platform": platform,
-        }
-        if adapter:
-            payload["adapter"] = adapter
-        if session_name:
-            payload["session_name"] = session_name
-
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                self._api_url("/sessions"),
-                json=payload,
-                headers=self._api_headers(),
-                timeout=30.0,
-            )
-            response.raise_for_status()
-        return response.json()
+        return await self._callbacks.create_session(
+            directory=directory,
+            platform=platform,
+            adapter=adapter,
+            session_name=session_name,
+        )
 
     async def _send_input_or_start_via_api(self, *, session_id: str, text: str) -> None:
-        """Send input; if the session is in CREATED, start it with the input as prompt.
+        """Send human input to a session.
 
-        Bridges generally forward human messages as input. Newly-created sessions
-        are in CREATED and must be started with /start for the first prompt.
+        The callback implementation should handle starting a CREATED session
+        automatically when input is sent.
         """
-        import httpx
-
-        async def _post_input() -> None:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(
-                    self._api_url(f"/sessions/{session_id}/input"),
-                    json={"text": text},
-                    headers=self._api_headers(),
-                    timeout=30.0,
-                )
-                r.raise_for_status()
-
-        async def _post_start() -> None:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(
-                    self._api_url(f"/sessions/{session_id}/start"),
-                    json={"prompt": text},
-                    headers=self._api_headers(),
-                    timeout=30.0,
-                )
-                r.raise_for_status()
-
-        try:
-            await _post_input()
-            return
-        except httpx.HTTPStatusError as e:
-            # CREATED sessions can't accept /input; promote to /start using the same text.
-            if e.response.status_code != 409:
-                raise
-            try:
-                data = e.response.json()
-            except Exception:
-                data = {}
-            code = (data.get("error") or {}).get("code")
-            if code != "INVALID_STATE":
-                raise
-
-        await _post_start()
+        await self._callbacks.send_input(session_id, text)
 
     async def _resolve_directory_arg(
         self,
@@ -386,10 +357,8 @@ class BridgeInterface(ABC):
         - If raw is just a name, resolve relative to:
           - base_directory's parent, if provided
           - otherwise the user's home directory
-        - Validate via /api/directories/check and return the normalized path.
+        - Validate via check_directory callback and return the normalized path.
         """
-        import httpx
-
         raw = (raw or "").strip()
         if not raw:
             raise ValueError("directory is required")
@@ -405,22 +374,13 @@ class BridgeInterface(ABC):
                     base_parent = Path(base_directory).expanduser().resolve().parent
                     candidates.append(str(base_parent / raw))
                 except Exception:
-                    # If base_directory is weird, still fall back to home.
                     pass
             candidates.append(str(Path.home() / raw))
 
         tried: list[str] = []
         for candidate in candidates:
             tried.append(candidate)
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    self._api_url("/directories/check"),
-                    params={"path": candidate},
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
-                r.raise_for_status()
-            data = r.json()
+            data = await self._callbacks.check_directory(candidate)
             if data.get("exists"):
                 return str(data.get("path") or candidate)
 
@@ -565,21 +525,14 @@ class BridgeInterface(ABC):
     async def _auto_approve(
         self, session_id: str, request: ApprovalRequest, *, reason: str = "Allow All"
     ) -> None:
-        """Silently approve a permission request via the API."""
-        import httpx
-
+        """Silently approve a permission request via callbacks."""
         try:
-            async with httpx.AsyncClient() as client:
-                await client.post(
-                    self._api_url(f"/sessions/{session_id}/permission"),
-                    json={
-                        "request_id": request.request_id,
-                        "allow": True,
-                        "message": f"Auto-approved ({reason} active)",
-                    },
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
+            await self._callbacks.respond_to_permission(
+                session_id,
+                request.request_id,
+                True,
+                f"Auto-approved ({reason} active)",
+            )
             logger.info(
                 "Auto-approved via %s",
                 reason,
@@ -643,17 +596,8 @@ class BridgeInterface(ABC):
     # ------------------------------------------------------------------
 
     async def _fetch_usage(self, session_id: str) -> dict:
-        """Fetch token/cost usage for a session from the API."""
-        import httpx
-
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                self._api_url(f"/sessions/{session_id}/usage"),
-                headers=self._api_headers(),
-                timeout=10.0,
-            )
-            response.raise_for_status()
-        return response.json()
+        """Fetch token/cost usage for a session via callbacks."""
+        return await self._callbacks.get_usage(session_id)
 
     def _format_usage_text(self, usage: dict) -> str:
         """Format usage dict as plain text."""
@@ -750,27 +694,19 @@ class BridgeInterface(ABC):
         allow: bool,
         message: str | None = None,
     ) -> bool:
-        """Send a permission response via the API.
+        """Send a permission response via callbacks.
 
         Returns True on success, False on error.
         """
-        import httpx
-
         try:
-            async with httpx.AsyncClient() as client:
-                r = await client.post(
-                    self._api_url(f"/sessions/{session_id}/permission"),
-                    json={
-                        "request_id": request_id,
-                        "allow": allow,
-                        "message": message or ("Approved" if allow else "User denied permission"),
-                    },
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
-                r.raise_for_status()
+            result = await self._callbacks.respond_to_permission(
+                session_id,
+                request_id,
+                allow,
+                message or ("Approved" if allow else "User denied permission"),
+            )
             self.clear_pending_permission(session_id)
-            return True
+            return result
         except Exception:
             logger.exception(
                 "Failed to respond to permission",

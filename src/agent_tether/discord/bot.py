@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agent_tether.base import (
     ApprovalRequest,
+    BridgeCallbacks,
     BridgeInterface,
     BridgeConfig,
     GetSessionDirectory,
@@ -51,12 +52,14 @@ class DiscordBridge(BridgeInterface):
         channel_id: int,
         discord_config: DiscordConfig | None = None,
         config: BridgeConfig | None = None,
+        callbacks: BridgeCallbacks | None = None,
         get_session_directory: GetSessionDirectory | None = None,
         get_session_info: GetSessionInfo | None = None,
         on_session_bound: OnSessionBound | None = None,
     ):
         super().__init__(
             config=config,
+            callbacks=callbacks,
             get_session_directory=get_session_directory,
             get_session_info=get_session_info,
             on_session_bound=on_session_bound,
@@ -231,21 +234,12 @@ class DiscordBridge(BridgeInterface):
         if not self._client:
             return
 
-        import httpx
-
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._api_url(f"/external-sessions/{external_id}/history"),
-                    headers=self._api_headers(),
-                    params={
-                        "runner_type": runner_type,
-                        "limit": _EXTERNAL_REPLAY_LIMIT,
-                    },
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-            payload = response.json()
+            payload = await self._callbacks.get_external_history(
+                external_id, runner_type, _EXTERNAL_REPLAY_LIMIT
+            )
+            if not payload:
+                return
         except Exception:
             logger.exception(
                 "Failed to fetch external session history for replay",
@@ -592,17 +586,8 @@ class DiscordBridge(BridgeInterface):
             await message.channel.send(f"🧵 Open thread: <#{thread_id}>")
 
     async def _cmd_status(self, message: any) -> None:
-        import httpx
-
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._api_url("/sessions"),
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-            sessions = response.json()
+            sessions = await self._callbacks.list_sessions()
         except Exception:
             logger.exception("Failed to fetch sessions for !status")
             await message.channel.send("Failed to fetch sessions.")
@@ -620,8 +605,6 @@ class DiscordBridge(BridgeInterface):
         await message.channel.send("\n".join(lines))
 
     async def _cmd_list(self, message: any, args: str) -> None:
-        import httpx
-
         page = 1
         query: str | None = None
         if args:
@@ -634,15 +617,9 @@ class DiscordBridge(BridgeInterface):
                 query = args.strip()
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._api_url("/external-sessions"),
-                    headers=self._api_headers(),
-                    params={"limit": _EXTERNAL_MAX_FETCH},
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-            self._cached_external = response.json()
+            self._cached_external = await self._callbacks.list_external_sessions(
+                limit=_EXTERNAL_MAX_FETCH
+            )
             if not args:
                 self._set_external_view(None)
             else:
@@ -656,8 +633,6 @@ class DiscordBridge(BridgeInterface):
         await message.channel.send(text)
 
     async def _cmd_attach(self, message: any, args: str) -> None:
-        import httpx
-
         if not args:
             await message.channel.send("Usage: !attach <number> [force]\n\nRun !list first.")
             return
@@ -684,19 +659,11 @@ class DiscordBridge(BridgeInterface):
         external = self._external_view[index]
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self._api_url("/sessions/attach"),
-                    json={
-                        "external_id": external["id"],
-                        "runner_type": external["runner_type"],
-                        "directory": external["directory"],
-                    },
-                    headers=self._api_headers(),
-                    timeout=30.0,
-                )
-                response.raise_for_status()
-            session = response.json()
+            session = await self._callbacks.attach_external(
+                external_id=external["id"],
+                runner_type=external["runner_type"],
+                directory=external["directory"],
+            )
             session_id = session["id"]
 
             # Check if already has a thread
@@ -770,15 +737,12 @@ class DiscordBridge(BridgeInterface):
                 f"A new thread has been created. Send messages there to interact."
             )
 
-        except httpx.HTTPStatusError as e:
-            await message.channel.send(f"Failed to attach: {e.response.text}")
         except Exception as e:
             logger.exception("Failed to attach to external session")
             await message.channel.send(f"Failed to attach: {e}")
 
     async def _cmd_stop(self, message: any) -> None:
         import discord
-        import httpx
 
         if not isinstance(message.channel, discord.Thread):
             await message.channel.send("Use this command inside a session thread.")
@@ -793,20 +757,8 @@ class DiscordBridge(BridgeInterface):
             return
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self._api_url(f"/sessions/{session_id}/interrupt"),
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
-                response.raise_for_status()
+            await self._callbacks.stop_session(session_id)
             await message.channel.send("⏹️ Session interrupted.")
-        except httpx.HTTPStatusError as e:
-            try:
-                error = e.response.json().get("error", {}).get("message", str(e))
-            except Exception:
-                error = str(e)
-            await message.channel.send(f"Cannot interrupt: {error}")
         except Exception as e:
             logger.exception("Failed to interrupt session")
             await message.channel.send(f"Failed to interrupt: {e}")
@@ -839,8 +791,6 @@ class DiscordBridge(BridgeInterface):
     # ------------------------------------------------------------------
 
     async def _forward_input(self, message: any, session_id: str, text: str) -> None:
-        import httpx
-
         if not self._is_authorized_user_id(getattr(message.author, "id", None)):
             await self._send_not_paired(message)
             return
@@ -870,19 +820,6 @@ class DiscordBridge(BridgeInterface):
                 thread_id=message.channel.id,
                 username=message.author.name,
             )
-        except httpx.HTTPStatusError as e:
-            try:
-                data = e.response.json()
-                err = data.get("error") or {}
-                code = err.get("code")
-                msg = err.get("message") or e.response.text
-                if code == "RUNNER_UNAVAILABLE":
-                    msg = (
-                        "Runner backend is not reachable. Start `codex-sdk-sidecar` and try again."
-                    )
-            except Exception:
-                msg = e.response.text
-            await message.channel.send(f"Failed to send input: {msg}")
         except Exception:
             logger.exception("Failed to forward human input", session_id=session_id)
             await message.channel.send("Failed to send input.")

@@ -9,6 +9,7 @@ import structlog
 
 from agent_tether.base import (
     ApprovalRequest,
+    BridgeCallbacks,
     BridgeInterface,
     BridgeConfig,
     GetSessionDirectory,
@@ -49,12 +50,14 @@ class TelegramBridge(BridgeInterface):
         forum_group_id: int,
         state_manager: StateManager | None = None,
         config: BridgeConfig | None = None,
+        callbacks: BridgeCallbacks | None = None,
         get_session_directory: GetSessionDirectory | None = None,
         get_session_info: GetSessionInfo | None = None,
         on_session_bound: OnSessionBound | None = None,
     ):
         super().__init__(
             config=config,
+            callbacks=callbacks,
             get_session_directory=get_session_directory,
             get_session_info=get_session_info,
             on_session_bound=on_session_bound,
@@ -282,18 +285,10 @@ class TelegramBridge(BridgeInterface):
         if not self._app:
             return
 
-        import httpx
-
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._api_url(f"/external-sessions/{external_id}/history"),
-                    headers=self._api_headers(),
-                    params={"runner_type": runner_type, "limit": limit},
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-            payload = response.json()
+            payload = await self._callbacks.get_external_history(external_id, runner_type, limit)
+            if not payload:
+                return
         except Exception:
             logger.exception(
                 "Failed to fetch external session history for replay",
@@ -382,17 +377,9 @@ class TelegramBridge(BridgeInterface):
 
     async def _refresh_external_cache(self) -> None:
         """Refresh cached external session list from the API."""
-        import httpx
-
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                self._api_url("/external-sessions"),
-                headers=self._api_headers(),
-                params={"limit": _EXTERNAL_MAX_FETCH},
-                timeout=10.0,
-            )
-            response.raise_for_status()
-        self._cached_external = response.json()
+        self._cached_external = await self._callbacks.list_external_sessions(
+            limit=_EXTERNAL_MAX_FETCH
+        )
 
     def _external_pagination_markup(self, page: int, total_pages: int):
         """Build inline keyboard markup for external session pagination."""
@@ -433,17 +420,8 @@ class TelegramBridge(BridgeInterface):
 
     async def _cmd_status(self, update: Any, context: Any) -> None:
         """Handle /status — list all Tether sessions."""
-        import httpx
-
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._api_url("/sessions"),
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-            sessions = response.json()
+            sessions = await self._callbacks.list_sessions()
         except Exception:
             logger.exception("Failed to fetch sessions for /status")
             await update.message.reply_text("Failed to fetch sessions.")
@@ -495,7 +473,6 @@ class TelegramBridge(BridgeInterface):
 
     async def _cmd_attach(self, update: Any, context: Any) -> None:
         """Handle /attach <number> [force] — attach to an external session and create a topic."""
-        import httpx
 
         args = context.args
         if not args:
@@ -524,20 +501,12 @@ class TelegramBridge(BridgeInterface):
         external = self._external_view[index]
 
         try:
-            # Create Tether session via attach endpoint
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self._api_url("/sessions/attach"),
-                    json={
-                        "external_id": external["id"],
-                        "runner_type": external["runner_type"],
-                        "directory": external["directory"],
-                    },
-                    headers=self._api_headers(),
-                    timeout=30.0,
-                )
-                response.raise_for_status()
-            session = response.json()
+            # Create session by attaching to external
+            session = await self._callbacks.attach_external(
+                external_id=external["id"],
+                runner_type=external["runner_type"],
+                directory=external["directory"],
+            )
             session_id = session["id"]
 
             # Check if this session already has a topic
@@ -604,8 +573,6 @@ class TelegramBridge(BridgeInterface):
                 f"A new topic has been created. Send messages there to interact."
             )
 
-        except httpx.HTTPStatusError as e:
-            await update.message.reply_text(f"Failed to attach: {e.response.text}")
         except Exception as e:
             logger.exception("Failed to attach to external session")
             await update.message.reply_text(f"Failed to attach: {e}")
@@ -622,8 +589,6 @@ class TelegramBridge(BridgeInterface):
           - /new <agent> <directory>
           - /new <directory>
         """
-        import httpx
-
         args = getattr(context, "args", None) or []
         topic_id = update.message.message_thread_id
 
@@ -698,9 +663,6 @@ class TelegramBridge(BridgeInterface):
                 session_name=session_name,
             )
             new_topic_id = int(session.get("platform_thread_id") or 0)
-        except httpx.HTTPStatusError as e:
-            await update.message.reply_text(f"Failed to create session: {e.response.text}")
-            return
         except Exception as e:
             logger.exception("Failed to create session via /new")
             await update.message.reply_text(f"Failed to create session: {e}")
@@ -752,8 +714,6 @@ class TelegramBridge(BridgeInterface):
 
     async def _cmd_stop(self, update: Any, context: Any) -> None:
         """Handle /stop — interrupt the session in the current topic."""
-        import httpx
-
         topic_id = update.message.message_thread_id
         if not topic_id:
             await update.message.reply_text("Use this command inside a session topic.")
@@ -765,25 +725,14 @@ class TelegramBridge(BridgeInterface):
             return
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self._api_url(f"/sessions/{session_id}/interrupt"),
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
-                response.raise_for_status()
+            await self._callbacks.stop_session(session_id)
             await update.message.reply_text("⏹️ Session interrupted.")
-        except httpx.HTTPStatusError as e:
-            error = e.response.json().get("error", {}).get("message", str(e))
-            await update.message.reply_text(f"Cannot interrupt: {error}")
         except Exception as e:
             logger.exception("Failed to interrupt session")
             await update.message.reply_text(f"Failed to interrupt: {e}")
 
     async def _cmd_usage(self, update: Any, context: Any) -> None:
         """Handle /usage — show token and cost usage for the session in this topic."""
-        import httpx
-
         topic_id = update.message.message_thread_id
         if not topic_id:
             await update.message.reply_text("Use this command inside a session topic.")
@@ -795,14 +744,7 @@ class TelegramBridge(BridgeInterface):
             return
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._api_url(f"/sessions/{session_id}/usage"),
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-            usage = response.json()
+            usage = await self._callbacks.get_usage(session_id)
 
             input_t = usage.get("input_tokens", 0)
             output_t = usage.get("output_tokens", 0)
@@ -821,9 +763,6 @@ class TelegramBridge(BridgeInterface):
                 lines.append("Cost: <i>not tracked</i>")
 
             await update.message.reply_text("\n".join(lines), parse_mode="HTML")
-        except httpx.HTTPStatusError as e:
-            error = e.response.json().get("error", {}).get("message", str(e))
-            await update.message.reply_text(f"Failed to get usage: {error}")
         except Exception as e:
             logger.exception("Failed to get usage")
             await update.message.reply_text(f"Failed to get usage: {e}")
@@ -948,8 +887,6 @@ class TelegramBridge(BridgeInterface):
                 return
 
         try:
-            import httpx
-
             await self._send_input_or_start_via_api(session_id=session_id, text=text)
 
             logger.info(
@@ -958,19 +895,6 @@ class TelegramBridge(BridgeInterface):
                 topic_id=topic_id,
                 username=update.message.from_user.username,
             )
-        except httpx.HTTPStatusError as e:
-            try:
-                data = e.response.json()
-                err = data.get("error") or {}
-                code = err.get("code")
-                message = err.get("message") or e.response.text
-                if code == "RUNNER_UNAVAILABLE":
-                    message = (
-                        "Runner backend is not reachable. Start `codex-sdk-sidecar` and try again."
-                    )
-            except Exception:
-                message = e.response.text
-            await update.message.reply_text(f"Failed to send input: {message}")
         except Exception:
             logger.exception(
                 "Failed to forward human input",

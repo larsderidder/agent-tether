@@ -3,6 +3,7 @@
 from agent_tether.base import (
     ApprovalRequest,
     ApprovalResponse,
+    BridgeCallbacks,
     BridgeConfig,
     BridgeInterface,
     GetSessionDirectory,
@@ -17,6 +18,7 @@ __all__ = [
     # Core types
     "ApprovalRequest",
     "ApprovalResponse",
+    "BridgeCallbacks",
     "BridgeConfig",
     "BridgeInterface",
     "GetSessionDirectory",

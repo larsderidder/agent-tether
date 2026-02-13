@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_tether.base import (
     ApprovalRequest,
+    BridgeCallbacks,
     BridgeInterface,
     BridgeConfig,
     GetSessionDirectory,
@@ -34,12 +35,14 @@ class SlackBridge(BridgeInterface):
         channel_id: str,
         slack_app_token: str | None = None,
         config: BridgeConfig | None = None,
+        callbacks: BridgeCallbacks | None = None,
         get_session_directory: GetSessionDirectory | None = None,
         get_session_info: GetSessionInfo | None = None,
         on_session_bound: OnSessionBound | None = None,
     ):
         super().__init__(
             config=config,
+            callbacks=callbacks,
             get_session_directory=get_session_directory,
             get_session_info=get_session_info,
             on_session_bound=on_session_bound,
@@ -156,21 +159,12 @@ class SlackBridge(BridgeInterface):
         if not self._client:
             return
 
-        import httpx
-
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._api_url(f"/external-sessions/{external_id}/history"),
-                    headers=self._api_headers(),
-                    params={
-                        "runner_type": runner_type,
-                        "limit": _EXTERNAL_REPLAY_LIMIT,
-                    },
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-            payload = response.json()
+            payload = await self._callbacks.get_external_history(
+                external_id, runner_type, _EXTERNAL_REPLAY_LIMIT
+            )
+            if not payload:
+                return
         except Exception:
             logger.exception(
                 "Failed to fetch external session history for replay",
@@ -406,17 +400,8 @@ class SlackBridge(BridgeInterface):
         )
 
     async def _cmd_status(self, event: dict) -> None:
-        import httpx
-
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._api_url("/sessions"),
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-            sessions = response.json()
+            sessions = await self._callbacks.list_sessions()
         except Exception:
             logger.exception("Failed to fetch sessions for !status")
             await self._reply(event, "Failed to fetch sessions.")
@@ -434,8 +419,6 @@ class SlackBridge(BridgeInterface):
         await self._reply(event, "\n".join(lines))
 
     async def _cmd_list(self, event: dict, args: str) -> None:
-        import httpx
-
         page = 1
         query: str | None = None
         if args:
@@ -448,15 +431,9 @@ class SlackBridge(BridgeInterface):
                 query = args.strip()
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    self._api_url("/external-sessions"),
-                    headers=self._api_headers(),
-                    params={"limit": _EXTERNAL_MAX_FETCH},
-                    timeout=10.0,
-                )
-                response.raise_for_status()
-            self._cached_external = response.json()
+            self._cached_external = await self._callbacks.list_external_sessions(
+                limit=_EXTERNAL_MAX_FETCH
+            )
             if not args:
                 self._set_external_view(None)
             else:
@@ -470,8 +447,6 @@ class SlackBridge(BridgeInterface):
         await self._reply(event, text)
 
     async def _cmd_attach(self, event: dict, args: str) -> None:
-        import httpx
-
         if not args:
             await self._reply(event, "Usage: !attach <number>\n\nRun !list first.")
             return
@@ -495,19 +470,11 @@ class SlackBridge(BridgeInterface):
         external = self._external_view[index]
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self._api_url("/sessions/attach"),
-                    json={
-                        "external_id": external["id"],
-                        "runner_type": external["runner_type"],
-                        "directory": external["directory"],
-                    },
-                    headers=self._api_headers(),
-                    timeout=30.0,
-                )
-                response.raise_for_status()
-            session = response.json()
+            session = await self._callbacks.attach_external(
+                external_id=external["id"],
+                runner_type=external["runner_type"],
+                directory=external["directory"],
+            )
             session_id = session["id"]
 
             # Check if already has a thread
@@ -543,15 +510,11 @@ class SlackBridge(BridgeInterface):
                 f"A new thread has been created. Send messages there to interact.",
             )
 
-        except httpx.HTTPStatusError as e:
-            await self._reply(event, f"Failed to attach: {e.response.text}")
         except Exception as e:
             logger.exception("Failed to attach to external session")
             await self._reply(event, f"Failed to attach: {e}")
 
     async def _cmd_stop(self, event: dict) -> None:
-        import httpx
-
         thread_ts = event.get("thread_ts")
         if not thread_ts:
             await self._reply(event, "Use this command inside a session thread.")
@@ -563,20 +526,8 @@ class SlackBridge(BridgeInterface):
             return
 
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    self._api_url(f"/sessions/{session_id}/interrupt"),
-                    headers=self._api_headers(),
-                    timeout=10.0,
-                )
-                response.raise_for_status()
+            await self._callbacks.stop_session(session_id)
             await self._reply(event, "⏹️ Session interrupted.")
-        except httpx.HTTPStatusError as e:
-            try:
-                error = e.response.json().get("error", {}).get("message", str(e))
-            except Exception:
-                error = str(e)
-            await self._reply(event, f"Cannot interrupt: {error}")
         except Exception as e:
             logger.exception("Failed to interrupt session")
             await self._reply(event, f"Failed to interrupt: {e}")
@@ -605,8 +556,6 @@ class SlackBridge(BridgeInterface):
     # ------------------------------------------------------------------
 
     async def _forward_input(self, event: dict, session_id: str, text: str) -> None:
-        import httpx
-
         # Check if this is an approval response (allow/deny) for a pending permission
         pending = self.get_pending_permission(session_id)
         if pending:
@@ -631,19 +580,6 @@ class SlackBridge(BridgeInterface):
                 session_id=session_id,
                 user=event.get("user"),
             )
-        except httpx.HTTPStatusError as e:
-            try:
-                data = e.response.json()
-                err = data.get("error") or {}
-                code = err.get("code")
-                msg = err.get("message") or e.response.text
-                if code == "RUNNER_UNAVAILABLE":
-                    msg = (
-                        "Runner backend is not reachable. Start `codex-sdk-sidecar` and try again."
-                    )
-            except Exception:
-                msg = e.response.text
-            await self._reply(event, f"Failed to send input: {msg}")
         except Exception:
             logger.exception("Failed to forward human input", session_id=session_id)
             await self._reply(event, "Failed to send input.")

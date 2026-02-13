@@ -13,3 +13,7 @@ venv/
 *.so
 .coverage
 htmlcov/
+
+.idea/
+uv.lock
+.pi/
