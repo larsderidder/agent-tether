@@ -2,7 +2,7 @@
 
 Connect AI coding agents to human oversight through Telegram, Slack, and Discord.
 
-A Python library extracted from [Tether](https://github.com/larsderidder/tether) that provides chat platform bridges for supervising AI agents. Each bridge handles platform-specific formatting, thread management, approval flows with inline buttons, auto-approve timers, and command handling.
+A Python library that provides chat platform bridges for supervising AI agents. Each bridge handles platform-specific formatting, thread management, approval flows with inline buttons, auto-approve timers, and command handling.
 
 **Use Cases:**
 - Monitor Claude Code or Codex sessions from your phone while agents run locally
@@ -10,7 +10,7 @@ A Python library extracted from [Tether](https://github.com/larsderidder/tether)
 - Set auto-approve timers (per-session, per-tool, per-directory)
 - Send additional input or stop agents remotely
 
-> **Note:** This library is designed to work with a running [Tether](https://github.com/larsderidder/tether) server. The bridges communicate with Tether's internal API for session management, permission handling, and input forwarding.
+> Looking for a ready-made solution for connecting your agents? Check out [Tether](https://github.com/larsderidder/tether).
 
 ## Install
 
