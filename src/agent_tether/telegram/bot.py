@@ -24,6 +24,7 @@ from agent_tether.telegram.formatting import (
     strip_tool_markers,
 )
 from agent_tether.telegram.state import StateManager
+from agent_tether.thread_naming import adapter_to_runner, format_thread_name
 
 logger = structlog.get_logger(__name__)
 
@@ -247,13 +248,24 @@ class TelegramBridge(BridgeInterface):
 
         return html_mod.escape(str(raw))
 
-    def _make_external_topic_name(self, *, directory: str, session_id: str) -> str:
-        """Generate a topic name from the directory, UpperCased.
+    def _make_external_topic_name(
+        self,
+        *,
+        directory: str,
+        session_id: str,
+        runner_type: str | None = None,
+    ) -> str:
+        """Generate a topic name from the directory and runner type.
 
-        If a topic with the same name already exists, append a number.
+        Format: ``"Runner / dirname"`` (or just ``"Dirname"`` if no runner
+        type is known). Appends a number if a topic with the same name
+        already exists.
         """
-        dir_short = (directory or "").rstrip("/").rsplit("/", 1)[-1] or "Session"
-        base_name = (dir_short[:1].upper() + dir_short[1:])[:_TELEGRAM_TOPIC_NAME_MAX_LEN]
+        base_name = format_thread_name(
+            directory=directory,
+            runner_type=runner_type,
+            max_len=_TELEGRAM_TOPIC_NAME_MAX_LEN,
+        )
 
         # Check existing topic names for duplicates
         existing_names = {m.name for m in self._state._mappings.values()}
@@ -548,6 +560,7 @@ class TelegramBridge(BridgeInterface):
             session_name = self._make_external_topic_name(
                 directory=external.get("directory", ""),
                 session_id=session_id,
+                runner_type=str(external.get("runner_type", "")),
             )
             thread_info = await self.create_thread(session_id, session_name)
             try:
@@ -650,8 +663,9 @@ class TelegramBridge(BridgeInterface):
             return
 
         dir_short = directory.rstrip("/").rsplit("/", 1)[-1] or "Session"
+        runner_type = adapter_to_runner(adapter or self._config.default_adapter)
         session_name = self._make_external_topic_name(
-            directory=directory, session_id=""
+            directory=directory, session_id="", runner_type=runner_type,
         )  # best-effort uniqueness
 
         try:
@@ -1093,7 +1107,9 @@ class TelegramBridge(BridgeInterface):
 
     async def on_output(self, session_id: str, text: str, metadata: dict | None = None) -> None:
         """Send output text to the session's Telegram topic."""
-        self._stop_typing(session_id)
+        is_final = bool(metadata and metadata.get("final"))
+        if is_final:
+            self._stop_typing(session_id)
         if not self._app:
             logger.warning("Telegram app not initialized")
             return

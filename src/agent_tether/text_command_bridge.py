@@ -25,6 +25,7 @@ from agent_tether.base import (
     _EXTERNAL_REPLAY_MAX_CHARS,
 )
 from agent_tether.thread_state import load_mapping, save_mapping
+from agent_tether.thread_naming import format_thread_name
 
 logger = structlog.get_logger(__name__)
 
@@ -86,14 +87,24 @@ class TextCommandBridge(BridgeInterface):
 
         return base_name
 
-    def _make_external_thread_name(self, *, directory: str, session_id: str) -> str:
-        """Generate a unique thread name from a directory path.
+    def _make_external_thread_name(
+        self,
+        *,
+        directory: str,
+        session_id: str,
+        runner_type: str | None = None,
+    ) -> str:
+        """Generate a unique thread name from a directory and runner type.
 
-        Uses the last path component, upper-cased, and appends a number
-        if a thread with the same name already exists.
+        Format: ``"Runner / dirname"`` (or just ``"Dirname"`` if no runner
+        type is known). Appends a number if a thread with the same name
+        already exists.
         """
-        dir_short = (directory or "").rstrip("/").rsplit("/", 1)[-1] or "Session"
-        base_name = (dir_short[:1].upper() + dir_short[1:])[:_THREAD_NAME_MAX_LEN]
+        base_name = format_thread_name(
+            directory=directory,
+            runner_type=runner_type,
+            max_len=_THREAD_NAME_MAX_LEN,
+        )
         return self._pick_unique_thread_name(base_name)
 
     def _reserve_thread_name(self, session_id: str, name: str) -> None:

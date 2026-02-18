@@ -7,7 +7,7 @@ import pytest
 
 from agent_tether.base import ApprovalRequest, BridgeConfig, BridgeInterface
 from agent_tether.manager import BridgeManager
-from agent_tether.subscriber import BridgeSubscriber
+from agent_tether.subscriber import BridgeSubscriber, _OUTPUT_FLUSH_DELAY_S
 
 
 class FakeBridge(BridgeInterface):
@@ -138,7 +138,7 @@ async def test_unsubscribe_without_platform():
 
 @pytest.mark.asyncio
 async def test_output_final_true():
-    """Test output event with final=True is forwarded."""
+    """Test output event with final=True is forwarded immediately."""
     subscriber, bridge, store = _make_subscriber()
 
     subscriber.subscribe("sess_1", "test")
@@ -153,24 +153,150 @@ async def test_output_final_true():
 
 
 @pytest.mark.asyncio
-async def test_output_final_false_skipped():
-    """Test output event with final=False is skipped."""
+async def test_output_step_buffered_and_flushed_on_timer():
+    """Test step output is buffered and flushed after the delay."""
     subscriber, bridge, store = _make_subscriber()
 
     subscriber.subscribe("sess_1", "test")
     queue = subscriber._queues["sess_1"]
 
-    queue.put_nowait({"type": "output", "data": {"text": "Step output", "final": False}})
+    queue.put_nowait({"type": "output", "data": {"text": "[tool: bash]\n", "final": False}})
+    queue.put_nowait({"type": "output", "data": {"text": "$ ls -la\n", "final": False}})
+    await asyncio.sleep(0.05)
+
+    # Not yet flushed (timer hasn't fired)
+    assert bridge.outputs == []
+
+    # Wait for flush timer
+    await asyncio.sleep(_OUTPUT_FLUSH_DELAY_S + 0.2)
+
+    # Now should be flushed as a single concatenated message
+    assert len(bridge.outputs) == 1
+    assert bridge.outputs[0] == ("sess_1", "[tool: bash]\n$ ls -la\n")
+
+    await subscriber.unsubscribe("sess_1", platform="test")
+
+
+@pytest.mark.asyncio
+async def test_output_step_flushed_on_state_change():
+    """Test buffered step output is flushed when state changes to AWAITING_INPUT."""
+    subscriber, bridge, store = _make_subscriber()
+
+    subscriber.subscribe("sess_1", "test")
+    queue = subscriber._queues["sess_1"]
+
+    queue.put_nowait({"type": "output", "data": {"text": "Step output\n", "final": False}})
+    await asyncio.sleep(0.05)
+
+    # Not yet flushed
+    assert bridge.outputs == []
+
+    # State change flushes buffer
+    queue.put_nowait({"type": "session_state", "data": {"state": "AWAITING_INPUT"}})
+    await asyncio.sleep(0.05)
+
+    assert len(bridge.outputs) == 1
+    assert bridge.outputs[0] == ("sess_1", "Step output\n")
+
+    await subscriber.unsubscribe("sess_1", platform="test")
+
+
+@pytest.mark.asyncio
+async def test_output_step_flushed_before_final():
+    """Test buffered step output is flushed before final output is sent."""
+    subscriber, bridge, store = _make_subscriber()
+
+    subscriber.subscribe("sess_1", "test")
+    queue = subscriber._queues["sess_1"]
+
+    queue.put_nowait({"type": "output", "data": {"text": "[tool: bash]\n", "final": False}})
+    await asyncio.sleep(0.05)
+    queue.put_nowait({"type": "output", "data": {"text": "Final answer", "final": True}})
+    await asyncio.sleep(0.05)
+
+    # Both step buffer and final should be delivered, in order
+    assert len(bridge.outputs) == 2
+    assert bridge.outputs[0] == ("sess_1", "[tool: bash]\n")
+    assert bridge.outputs[1] == ("sess_1", "Final answer")
+
+    await subscriber.unsubscribe("sess_1", platform="test")
+
+
+@pytest.mark.asyncio
+async def test_output_step_flushed_on_permission_request():
+    """Test buffered step output is flushed before a permission request."""
+    subscriber, bridge, store = _make_subscriber()
+
+    subscriber.subscribe("sess_1", "test")
+    queue = subscriber._queues["sess_1"]
+
+    queue.put_nowait({"type": "output", "data": {"text": "[tool: write]\n", "final": False}})
+    await asyncio.sleep(0.05)
+    queue.put_nowait(
+        {
+            "type": "permission_request",
+            "data": {
+                "request_id": "req_1",
+                "tool_name": "Write",
+                "tool_input": {"path": "/tmp/test"},
+            },
+        }
+    )
+    await asyncio.sleep(0.05)
+
+    # Step output flushed, then approval request delivered
+    assert len(bridge.outputs) == 1
+    assert bridge.outputs[0] == ("sess_1", "[tool: write]\n")
+    assert len(bridge.approvals) == 1
+
+    await subscriber.unsubscribe("sess_1", platform="test")
+
+
+@pytest.mark.asyncio
+async def test_output_step_flushed_on_error():
+    """Test buffered step output is flushed on error events."""
+    subscriber, bridge, store = _make_subscriber()
+
+    subscriber.subscribe("sess_1", "test")
+    queue = subscriber._queues["sess_1"]
+
+    queue.put_nowait({"type": "output", "data": {"text": "Working...\n", "final": False}})
+    await asyncio.sleep(0.05)
+    queue.put_nowait({"type": "error", "data": {"message": "Connection lost"}})
+    await asyncio.sleep(0.05)
+
+    assert len(bridge.outputs) == 1
+    assert bridge.outputs[0] == ("sess_1", "Working...\n")
+    assert len(bridge.statuses) == 1
+
+    await subscriber.unsubscribe("sess_1", platform="test")
+
+
+@pytest.mark.asyncio
+async def test_output_step_flushed_on_unsubscribe():
+    """Test buffered output is flushed when unsubscribing."""
+    subscriber, bridge, store = _make_subscriber()
+
+    subscriber.subscribe("sess_1", "test")
+    queue = subscriber._queues["sess_1"]
+
+    queue.put_nowait({"type": "output", "data": {"text": "Buffered text\n", "final": False}})
     await asyncio.sleep(0.05)
 
     assert bridge.outputs == []
 
     await subscriber.unsubscribe("sess_1", platform="test")
 
+    # Unsubscribe should flush remaining buffer
+    assert len(bridge.outputs) == 1
+    assert bridge.outputs[0] == ("sess_1", "Buffered text\n")
+
+    await subscriber.unsubscribe("sess_1", platform="test")
+
 
 @pytest.mark.asyncio
 async def test_output_final_event_skipped():
-    """Test output_final event type is skipped (we use per-step final)."""
+    """Test output_final event type is skipped (we use per-step events)."""
     subscriber, bridge, store = _make_subscriber()
 
     subscriber.subscribe("sess_1", "test")

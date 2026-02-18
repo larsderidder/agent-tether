@@ -22,6 +22,7 @@ from agent_tether.discord.pairing_state import (
     save as save_pairing_state,
 )
 from agent_tether.text_command_bridge import TextCommandBridge
+from agent_tether.thread_naming import adapter_to_runner
 
 logger = structlog.get_logger(__name__)
 
@@ -422,7 +423,10 @@ class DiscordBridge(TextCommandBridge):
             or self._adapter_label(self._config.default_adapter)
             or "Claude"
         )
-        session_name = self._make_external_thread_name(directory=directory, session_id="")
+        runner_type = adapter_to_runner(adapter or self._config.default_adapter)
+        session_name = self._make_external_thread_name(
+            directory=directory, session_id="", runner_type=runner_type,
+        )
 
         try:
             session = await self._create_session_via_api(
@@ -558,6 +562,7 @@ class DiscordBridge(TextCommandBridge):
             session_name = self._make_external_thread_name(
                 directory=external.get("directory", ""),
                 session_id=session_id,
+                runner_type=str(external.get("runner_type", "")),
             )
             thread_info = await self.create_thread(session_id, session_name)
             try:
@@ -757,6 +762,22 @@ class DiscordBridge(TextCommandBridge):
 
         try:
             thread = self._client.get_channel(thread_id)
+            if thread is None:
+                # Thread not in local cache (e.g. after bot reconnect) — fetch from API
+                logger.debug(
+                    "Thread not in cache, fetching from API",
+                    session_id=session_id,
+                    thread_id=thread_id,
+                )
+                try:
+                    thread = await self._client.fetch_channel(thread_id)
+                except Exception:
+                    logger.warning(
+                        "Failed to fetch Discord thread",
+                        session_id=session_id,
+                        thread_id=thread_id,
+                    )
+                    return
             if thread:
                 # Discord has a 2000 char limit per message
                 for i in range(0, len(text), _DISCORD_MSG_LIMIT):
