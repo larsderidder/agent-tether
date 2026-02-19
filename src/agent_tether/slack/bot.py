@@ -194,6 +194,8 @@ class SlackBridge(TextCommandBridge):
             await self._cmd_new(event, args)
         elif cmd == "!stop":
             await self._cmd_stop(event)
+        elif cmd == "!sync":
+            await self._cmd_sync(event)
         elif cmd == "!usage":
             await self._cmd_usage(event)
         else:
@@ -212,6 +214,7 @@ class SlackBridge(TextCommandBridge):
             "!attach <number> — Attach to an external session\n"
             "!new [agent] [directory] — Start a new session\n"
             "!stop — Interrupt the session in this thread\n"
+            "!sync — Pull new messages from the attached external session\n"
             "!usage — Show token usage and cost for this session\n"
             "!help — Show this help\n\n"
             "Send a text message in a session thread to forward it as input."
@@ -395,6 +398,34 @@ class SlackBridge(TextCommandBridge):
             logger.exception("Failed to interrupt session")
             await self._reply(event, f"Failed to interrupt: {e}")
 
+    async def _cmd_sync(self, event: dict) -> None:
+        """Handle !sync — pull new messages from an attached external session."""
+        thread_ts = event.get("thread_ts")
+        if not thread_ts:
+            await self._reply(event, "Use this command inside a session thread.")
+            return
+
+        session_id = self._session_for_thread(thread_ts)
+        if not session_id:
+            await self._reply(event, "No session linked to this thread.")
+            return
+
+        if not self._callbacks.sync_session:
+            await self._reply(event, "Sync is not supported by this Tether version.")
+            return
+
+        try:
+            result = await self._callbacks.sync_session(session_id)
+            synced = result.get("synced", 0)
+            total = result.get("total", 0)
+            if synced:
+                await self._reply(event, f"🔄 Synced {synced} new message(s) ({total} total).")
+            else:
+                await self._reply(event, f"✅ Already up to date ({total} message(s) total).")
+        except Exception as e:
+            logger.exception("Failed to sync session")
+            await self._reply(event, f"Failed to sync: {e}")
+
     async def _cmd_usage(self, event: dict) -> None:
         """Show token usage for the session in the current thread."""
         thread_ts = event.get("thread_ts")
@@ -450,9 +481,9 @@ class SlackBridge(TextCommandBridge):
                 session_id=session_id,
                 user=event.get("user"),
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to forward human input", session_id=session_id)
-            await self._reply(event, "Failed to send input.")
+            await self._reply(event, f"❌ Failed to send input: {exc}")
 
     # ------------------------------------------------------------------
     # Bridge interface (outgoing events)

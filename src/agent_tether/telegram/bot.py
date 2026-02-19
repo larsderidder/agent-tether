@@ -908,13 +908,13 @@ class TelegramBridge(BridgeInterface):
                 topic_id=topic_id,
                 username=update.message.from_user.username,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Failed to forward human input",
                 session_id=session_id,
                 topic_id=topic_id,
             )
-            await update.message.reply_text("Failed to send input.")
+            await update.message.reply_text(f"❌ Failed to send input: {exc}")
 
     async def _handle_callback_query(self, update: Any, context: Any) -> None:
         """Handle approval button clicks in Telegram."""

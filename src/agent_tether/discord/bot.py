@@ -284,6 +284,8 @@ class DiscordBridge(TextCommandBridge):
             await self._cmd_new(message, args)
         elif cmd == "!stop":
             await self._cmd_stop(message)
+        elif cmd == "!sync":
+            await self._cmd_sync(message)
         elif cmd == "!usage":
             await self._cmd_usage(message)
         elif cmd == "!pair":
@@ -310,6 +312,7 @@ class DiscordBridge(TextCommandBridge):
             "!attach <number> [force] — Attach to an external session\n"
             "!new [agent] [directory] — Start a new session\n"
             "!stop — Interrupt the session in this thread\n"
+            "!sync — Pull new messages from the attached external session\n"
             "!usage — Show token usage and cost for this session\n"
             "!setup <code> — Configure this channel as the control channel and pair you\n"
             "!pair <code> — Pair your Discord user to authorize commands\n"
@@ -626,6 +629,38 @@ class DiscordBridge(TextCommandBridge):
             logger.exception("Failed to interrupt session")
             await message.channel.send(f"Failed to interrupt: {e}")
 
+    async def _cmd_sync(self, message: Any) -> None:
+        """Handle !sync — pull new messages from an attached external session."""
+        import discord
+
+        if not isinstance(message.channel, discord.Thread):
+            await message.channel.send("Use this command inside a session thread.")
+            return
+        if not self._is_authorized_user_id(getattr(message.author, "id", None)):
+            await self._send_not_paired(message)
+            return
+
+        session_id = self._session_for_thread(message.channel.id)
+        if not session_id:
+            await message.channel.send("No session linked to this thread.")
+            return
+
+        if not self._callbacks.sync_session:
+            await message.channel.send("Sync is not supported by this Tether version.")
+            return
+
+        try:
+            result = await self._callbacks.sync_session(session_id)
+            synced = result.get("synced", 0)
+            total = result.get("total", 0)
+            if synced:
+                await message.channel.send(f"🔄 Synced {synced} new message(s) ({total} total).")
+            else:
+                await message.channel.send(f"✅ Already up to date ({total} message(s) total).")
+        except Exception as e:
+            logger.exception("Failed to sync session")
+            await message.channel.send(f"Failed to sync: {e}")
+
     async def _cmd_usage(self, message: Any) -> None:
         """Show token usage for the session in the current thread."""
         try:
@@ -688,9 +723,9 @@ class DiscordBridge(TextCommandBridge):
                 thread_id=message.channel.id,
                 username=message.author.name,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Failed to forward human input", session_id=session_id)
-            await message.channel.send("Failed to send input.")
+            await message.channel.send(f"❌ Failed to send input: {exc}")
 
     # ------------------------------------------------------------------
     # Typing indicator
