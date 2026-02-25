@@ -665,7 +665,9 @@ class TelegramBridge(BridgeInterface):
         dir_short = directory.rstrip("/").rsplit("/", 1)[-1] or "Session"
         runner_type = adapter_to_runner(adapter or self._config.default_adapter)
         session_name = self._make_external_topic_name(
-            directory=directory, session_id="", runner_type=runner_type,
+            directory=directory,
+            session_id="",
+            runner_type=runner_type,
         )  # best-effort uniqueness
 
         try:

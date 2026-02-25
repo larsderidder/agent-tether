@@ -67,7 +67,9 @@ def test_make_external_thread_name_with_runner_type(tmp_path):
     """Test thread name includes runner label when runner_type is given."""
     bridge = FakeTextBridge(tmp_path)
     name = bridge._make_external_thread_name(
-        directory="/home/user/my-repo", session_id="s1", runner_type="pi",
+        directory="/home/user/my-repo",
+        session_id="s1",
+        runner_type="pi",
     )
     assert name == "Pi / My-repo"
 
@@ -76,7 +78,9 @@ def test_make_external_thread_name_with_claude_runner(tmp_path):
     """Test Claude runner types all map to 'Claude' label."""
     bridge = FakeTextBridge(tmp_path)
     name = bridge._make_external_thread_name(
-        directory="/home/user/project", session_id="s1", runner_type="claude-subprocess",
+        directory="/home/user/project",
+        session_id="s1",
+        runner_type="claude-subprocess",
     )
     assert name == "Claude / Project"
 
@@ -85,7 +89,9 @@ def test_make_external_thread_name_unknown_runner(tmp_path):
     """Test unknown runner_type falls back to directory-only name."""
     bridge = FakeTextBridge(tmp_path)
     name = bridge._make_external_thread_name(
-        directory="/home/user/my-repo", session_id="s1", runner_type="unknown_thing",
+        directory="/home/user/my-repo",
+        session_id="s1",
+        runner_type="unknown_thing",
     )
     assert name == "My-repo"
 
@@ -103,7 +109,9 @@ def test_make_external_thread_name_dedup_with_runner(tmp_path):
     bridge = FakeTextBridge(tmp_path)
     bridge._used_thread_names.add("Pi / My-repo")
     name = bridge._make_external_thread_name(
-        directory="/home/user/my-repo", session_id="s1", runner_type="pi",
+        directory="/home/user/my-repo",
+        session_id="s1",
+        runner_type="pi",
     )
     assert name == "Pi / My-repo 2"
 

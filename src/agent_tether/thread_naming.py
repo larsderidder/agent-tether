@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-
 RUNNER_DISPLAY_NAMES: dict[str, str] = {
     "claude-subprocess": "Claude",
     "claude-local": "Claude",

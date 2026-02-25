@@ -243,7 +243,9 @@ class SlackBridge(TextCommandBridge):
         )
         runner_type = adapter_to_runner(adapter or self._config.default_adapter)
         session_name = self._make_external_thread_name(
-            directory=directory, session_id="", runner_type=runner_type,
+            directory=directory,
+            session_id="",
+            runner_type=runner_type,
         )
 
         try:
