@@ -92,6 +92,9 @@ class BridgeCallbacks:
     attach_external: Callable[..., Awaitable[dict]]
     """Attach to an external session. (external_id, runner_type, directory). Returns session dict."""
 
+    sync_session: Callable[[str], Awaitable[dict]] | None = None
+    """Pull new messages from an attached external session. (session_id). Returns {synced, total}."""
+
 
 _EXTERNAL_PAGE_SIZE = 10
 _EXTERNAL_MAX_FETCH = 200
